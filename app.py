@@ -12,7 +12,7 @@ from openpyxl import Workbook, load_workbook
 db = SQLAlchemy()
 migrate = Migrate()
 CUT_OFF = date(2026, 9, 1)
-ROLES = ["Administrator", "Chairman", "Secretary", "Accountant", "Member"]
+ROLES = ["Administrator", "Chairman", "Secretary", "Treasurer", "Accountant", "Member"]
 CENT = Decimal("0.01")
 
 def money(v):
@@ -158,6 +158,29 @@ class AuditLog(db.Model):
 class Setting(db.Model):
     key = db.Column(db.String(80), primary_key=True)
     value = db.Column(db.String(250), nullable=False)
+
+class Meeting(db.Model):
+    id=db.Column(db.Integer, primary_key=True)
+    meeting_date=db.Column(db.Date, nullable=False)
+    title=db.Column(db.String(200), nullable=False)
+    minutes=db.Column(db.Text)
+    resolutions=db.Column(db.Text)
+    attendance=db.Column(db.Text)
+    created_by=db.Column(db.Integer, db.ForeignKey("user.id"))
+    created_at=db.Column(db.DateTime, default=datetime.utcnow)
+
+class MpesaImport(db.Model):
+    id=db.Column(db.Integer, primary_key=True)
+    transaction_code=db.Column(db.String(80), unique=True, nullable=False)
+    transaction_date=db.Column(db.DateTime)
+    phone=db.Column(db.String(40))
+    member_no=db.Column(db.String(30))
+    amount=db.Column(db.Numeric(14,2), nullable=False)
+    reference_text=db.Column(db.String(250))
+    matched_member_id=db.Column(db.Integer, db.ForeignKey("member.id"))
+    status=db.Column(db.String(20), default="Unmatched")
+    imported_at=db.Column(db.DateTime, default=datetime.utcnow)
+    member=db.relationship("Member")
 
 def audit(action, record_type, record_id=None, reason=None, before=None, after=None):
     import json
@@ -315,10 +338,17 @@ def create_app():
     def logout(): session.clear(); return redirect(url_for("login"))
 
     @app.route("/members",methods=["GET","POST"])
-    @roles_required("Administrator","Chairman","Secretary","Accountant")
+    @roles_required("Administrator","Chairman","Secretary","Accountant","Treasurer")
     def members():
         if request.method=="POST":
-            m=Member(member_no=request.form["member_no"].strip(),full_name=request.form["full_name"].strip(),
+            name=request.form["full_name"].strip()
+            if not name: flash("Actual member name is required.","danger"); return redirect(url_for("members"))
+            member_no=(request.form.get("member_no") or "").strip().upper()
+            if not member_no:
+                member_no=f"VK-{(db.session.query(func.max(Member.id)).scalar() or 0)+1:04d}"
+            if Member.query.filter((Member.member_no==member_no)|(Member.phone==request.form.get("phone"))).first():
+                flash("Duplicate member number or phone number.","danger"); return redirect(url_for("members"))
+            m=Member(member_no=member_no,full_name=name,
                 phone=request.form.get("phone"),email=request.form.get("email"))
             db.session.add(m); db.session.flush(); audit("CREATE","Member",m.id,after={"member_no":m.member_no,"name":m.full_name})
             db.session.commit(); flash("Member created.","success"); return redirect(url_for("members"))
@@ -369,7 +399,7 @@ def create_app():
         return render_template("loans.html",members=Member.query.filter_by(active=True).all(),loans=ls)
 
     @app.route("/loans/<int:loan_id>/repay",methods=["POST"])
-    @roles_required("Administrator","Chairman","Accountant")
+    @roles_required("Administrator","Chairman","Accountant","Treasurer")
     def repay(loan_id):
         loan=db.get_or_404(Loan,loan_id)
         try:
@@ -384,7 +414,7 @@ def create_app():
         return redirect(url_for("loans"))
 
     @app.route("/opening",methods=["GET","POST"])
-    @roles_required("Administrator","Chairman","Accountant")
+    @roles_required("Administrator","Chairman","Accountant","Treasurer")
     def opening():
         if request.method=="POST":
             action=request.form.get("action")
@@ -409,7 +439,7 @@ def create_app():
             batches=OpeningBatch.query.order_by(OpeningBatch.created_at.desc()).all())
 
     @app.route("/opening/template")
-    @roles_required("Administrator","Chairman","Accountant")
+    @roles_required("Administrator","Chairman","Accountant","Treasurer")
     def opening_template():
         wb=Workbook(); ws=wb.active; ws.title="Opening Balances"
         ws.append(["Member No","Member Name","SHARE","SOCIAL","Unpaid Penalty","Loan Principal","Loan Interest","Other Adjustment","Adjustment Description"])
@@ -417,7 +447,7 @@ def create_app():
         return excel_send(wb,"Visionaries_Opening_Balances_Template.xlsx")
 
     @app.route("/opening/upload",methods=["POST"])
-    @roles_required("Administrator","Accountant")
+    @roles_required("Administrator","Accountant","Treasurer")
     def opening_upload():
         f=request.files.get("file")
         if not f: flash("Select an Excel file.","danger"); return redirect(url_for("opening"))
@@ -445,7 +475,7 @@ def create_app():
         return redirect(url_for("opening"))
 
     @app.route("/reconciliation",methods=["GET","POST"])
-    @roles_required("Administrator","Chairman","Accountant")
+    @roles_required("Administrator","Chairman","Accountant","Treasurer")
     def reconciliation():
         if request.method=="POST":
             d=date.fromisoformat(request.form["recon_date"]); exp=money(expected_mpesa(d)); actual=money(request.form["actual_balance"])
@@ -468,7 +498,7 @@ def create_app():
         return redirect(url_for("reconciliation"))
 
     @app.route("/cash-movements",methods=["GET","POST"])
-    @roles_required("Administrator","Chairman","Accountant")
+    @roles_required("Administrator","Chairman","Accountant","Treasurer")
     def cash_movements():
         if request.method=="POST":
             m=CashMovement(movement_date=date.fromisoformat(request.form["movement_date"]),category=request.form["category"],
@@ -560,17 +590,187 @@ def create_app():
     def audit_page():
         return render_template("audit.html",rows=AuditLog.query.order_by(AuditLog.created_at.desc()).limit(500).all())
 
+    @app.route("/members/template")
+    @roles_required("Administrator","Chairman","Secretary")
+    def member_template():
+        wb=Workbook(); ws=wb.active; ws.title="Members"
+        ws.append(["Member No (optional)","Full Name","Phone","Email","Joined On (YYYY-MM-DD)"])
+        return excel_send(wb,"Visionaries_Member_Import_Template.xlsx")
+
+    @app.route("/members/import",methods=["POST"])
+    @roles_required("Administrator","Secretary")
+    def member_import():
+        f=request.files.get("file")
+        if not f: flash("Choose an Excel workbook.","danger"); return redirect(url_for("members"))
+        try:
+            ws=load_workbook(f,data_only=True).active
+            headers=[str(c.value or "").strip() for c in ws[1]]
+            idx={h:i for i,h in enumerate(headers)}
+            if "Full Name" not in idx: raise ValueError("Template must contain Full Name.")
+            count=0
+            for row in ws.iter_rows(min_row=2,values_only=True):
+                name=str(row[idx["Full Name"]] or "").strip()
+                if not name: continue
+                phone=str(row[idx["Phone"]] or "").strip() if "Phone" in idx and row[idx["Phone"]] else None
+                if phone and Member.query.filter_by(phone=phone).first(): raise ValueError(f"Duplicate phone: {phone}")
+                no=str(row[idx["Member No (optional)"]] or "").strip() if "Member No (optional)" in idx and row[idx["Member No (optional)"]] else ""
+                if not no: no=f"VK-{(db.session.query(func.max(Member.id)).scalar() or 0)+1:04d}"
+                if Member.query.filter_by(member_no=no).first(): raise ValueError(f"Duplicate member number: {no}")
+                joined=date.fromisoformat(str(row[idx["Joined On (YYYY-MM-DD)"]])[:10]) if "Joined On (YYYY-MM-DD)" in idx and row[idx["Joined On (YYYY-MM-DD)"]] else CUT_OFF
+                db.session.add(Member(member_no=no,full_name=name,phone=phone,
+                    email=str(row[idx["Email"]]) if "Email" in idx and row[idx["Email"]] else None,joined_on=joined)); count+=1
+            audit("IMPORT","Members",after={"count":count}); db.session.commit()
+            flash(f"Imported {count} members.","success")
+        except Exception as e: db.session.rollback(); flash(f"Import rejected: {e}","danger")
+        return redirect(url_for("members"))
+
+    @app.route("/members/<int:mid>/status",methods=["POST"])
+    @roles_required("Administrator","Secretary")
+    def member_status(mid):
+        m=db.get_or_404(Member,mid); m.active=not m.active
+        audit("STATUS","Member",m.id,after={"active":m.active}); db.session.commit()
+        flash("Member status updated.","success"); return redirect(url_for("members"))
+
+    @app.route("/members/<int:mid>/edit",methods=["POST"])
+    @roles_required("Administrator","Secretary")
+    def member_edit(mid):
+        m=db.get_or_404(Member,mid)
+        name=request.form.get("full_name","").strip()
+        if not name: flash("Member name is required.","danger")
+        else:
+            m.full_name=name; m.phone=request.form.get("phone"); m.email=request.form.get("email")
+            audit("UPDATE","Member",m.id); db.session.commit(); flash("Member updated.","success")
+        return redirect(url_for("members"))
+
+    @app.route("/members/<int:mid>/statement.pdf")
+    @login_required
+    def member_statement_pdf(mid):
+        if current_user().role=="Member" and current_user().member_id!=mid: abort(403)
+        member=db.get_or_404(Member,mid)
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+        out=io.BytesIO(); doc=SimpleDocTemplate(out,pagesize=A4); styles=getSampleStyleSheet()
+        data=[["Date","Reference","Category","Amount (TZS)","Description"]]
+        for x in txn_query(member_id=mid).order_by(Transaction.transaction_date).all():
+            data.append([x.transaction_date.isoformat(),x.reference,x.category,fmt(x.amount),x.description or ""])
+        doc.build([Paragraph(f"Member Statement — {member.full_name} ({member.member_no})",styles["Title"]),Spacer(1,12),Table(data,repeatRows=1)])
+        out.seek(0); return send_file(out,mimetype="application/pdf",as_attachment=True,download_name=f"{member.member_no}_statement.pdf")
+
+    @app.route("/cashbook")
+    @roles_required("Administrator","Chairman","Secretary","Accountant","Treasurer")
+    def cashbook():
+        start=request.args.get("start"); end=request.args.get("end")
+        try: sd=date.fromisoformat(start) if start else date.today().replace(day=1)
+        except ValueError: sd=date.today().replace(day=1)
+        try: ed=date.fromisoformat(end) if end else date.today()
+        except ValueError: ed=date.today()
+        transactions=txn_query().filter(Transaction.transaction_date.between(sd,ed)).order_by(Transaction.transaction_date).all()
+        movements=CashMovement.query.filter_by(status="Posted").filter(CashMovement.movement_date.between(sd,ed)).all()
+        rows=[]
+        for t in transactions:
+            inflow=money(t.amount) if t.category in ["SHARE","SOCIAL","PENALTY","LOAN_INTEREST","LOAN_PRINCIPAL"] else Decimal("0")
+            outflow=money(t.amount) if t.category=="LOAN_DISBURSEMENT" else Decimal("0")
+            rows.append((t.transaction_date,t.reference,t.category,inflow,outflow,t.description or ""))
+        for m in movements:
+            rows.append((m.movement_date,"CASH-"+str(m.id),m.category,money(m.amount) if m.direction=="IN" else Decimal("0"),money(m.amount) if m.direction=="OUT" else Decimal("0"),m.description))
+        rows.sort(key=lambda x:x[0])
+        return render_template("cashbook.html",rows=rows,start=sd,end=ed,
+            total_in=sum((r[3] for r in rows),Decimal("0")),total_out=sum((r[4] for r in rows),Decimal("0")))
+
+    @app.route("/loans/<int:loan_id>/receipt.pdf")
+    @roles_required("Administrator","Chairman","Secretary")
+    def loan_receipt(loan_id):
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib import colors
+        from reportlab.lib.styles import getSampleStyleSheet
+        loan=db.get_or_404(Loan,loan_id); member=loan.member
+        out=io.BytesIO(); doc=SimpleDocTemplate(out,pagesize=A4); st=getSampleStyleSheet()
+        p_out,i_out=loan_outstanding(loan)
+        data=[["VISIONARIES SMART KIKOBA","LOAN DISBURSEMENT RECEIPT"],
+          ["Loan reference",loan.loan_no],["Member",member.full_name],["Member number",member.member_no],
+          ["Approval / disbursement date",loan.disbursement_date.isoformat()],
+          ["Principal (TZS)",fmt(loan.principal)],["Interest rate",f"{loan.rate}% flat"],
+          ["Interest (TZS)",fmt(loan.interest_total)],["Total repayment (TZS)",fmt(money(loan.principal)+money(loan.interest_total))],
+          ["Repayment period",f"{loan.installments} monthly instalments"],
+          ["Instalment amount (TZS)",fmt((money(loan.principal)+money(loan.interest_total))/Decimal(loan.installments))],
+          ["Outstanding balance (TZS)",fmt(p_out+i_out)],["Authorised by","Chairman / authorised approver"]]
+        data += [["No.","Due date","Principal","Interest","Total"]]
+        for x in loan.schedules:
+            data.append([x.installment_no,x.due_date.isoformat(),fmt(x.principal_due),fmt(x.interest_due),fmt(money(x.principal_due)+money(x.interest_due))])
+        table=Table(data,colWidths=[130,100,90,90,90]); table.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
+            ("GRID",(0,0),(-1,-1),.4,colors.grey),("FONTNAME",(0,0),(-1,-1),"Helvetica"),
+            ("PADDING",(0,0),(-1,-1),6),("BACKGROUND",(0,1),(-1,-1),colors.whitesmoke)]))
+        doc.build([Paragraph("VISIONARIES SMART KIKOBA — OFFICIAL LOAN RECEIPT",st["Title"]),Spacer(1,12),table])
+        out.seek(0); return send_file(out,mimetype="application/pdf",as_attachment=True,download_name=f"{loan.loan_no}_receipt.pdf")
+
+    @app.route("/loans/<int:loan_id>/schedule.pdf")
+    @login_required
+    def loan_schedule_pdf(loan_id):
+        loan=db.get_or_404(Loan,loan_id)
+        if current_user().role=="Member" and loan.member_id!=current_user().member_id: abort(403)
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Table
+        from reportlab.lib.styles import getSampleStyleSheet
+        out=io.BytesIO(); doc=SimpleDocTemplate(out,pagesize=A4)
+        data=[["Instalment","Due date","Principal due","Interest due","Paid"]]
+        for x in loan.schedules: data.append([x.installment_no,x.due_date.isoformat(),fmt(x.principal_due),fmt(x.interest_due),fmt(money(x.principal_paid)+money(x.interest_paid))])
+        doc.build([Paragraph(f"Repayment schedule: {loan.loan_no}",getSampleStyleSheet()["Title"]),Table(data)])
+        out.seek(0); return send_file(out,mimetype="application/pdf",as_attachment=True,download_name=f"{loan.loan_no}_schedule.pdf")
+
+    @app.route("/meetings",methods=["GET","POST"])
+    @roles_required("Administrator","Chairman","Secretary")
+    def meetings():
+        if request.method=="POST":
+            m=Meeting(meeting_date=date.fromisoformat(request.form["meeting_date"]),title=request.form["title"],
+                minutes=request.form.get("minutes"),resolutions=request.form.get("resolutions"),
+                attendance=request.form.get("attendance"),created_by=current_user().id)
+            db.session.add(m); db.session.flush(); audit("CREATE","Meeting",m.id); db.session.commit()
+            flash("Meeting minutes saved.","success"); return redirect(url_for("meetings"))
+        return render_template("meetings.html",rows=Meeting.query.order_by(Meeting.meeting_date.desc()).all())
+
+    @app.route("/reconciliation/import",methods=["POST"])
+    @roles_required("Administrator","Accountant","Treasurer")
+    def mpesa_import():
+        f=request.files.get("file")
+        if not f: flash("Select a CSV statement.","danger"); return redirect(url_for("reconciliation"))
+        try:
+            stream=io.StringIO(f.stream.read().decode("utf-8-sig")); reader=csv.DictReader(stream); count=0
+            for row in reader:
+                code=(row.get("Receipt No") or row.get("Transaction ID") or row.get("transaction_code") or "").strip()
+                if not code: continue
+                if MpesaImport.query.filter_by(transaction_code=code).first(): continue
+                phone=(row.get("Phone Number") or row.get("phone") or "").strip()
+                ref=(row.get("Account") or row.get("Reference") or row.get("reference") or "").strip()
+                amount=money(row.get("Paid In") or row.get("Amount") or 0)
+                member=Member.query.filter((Member.member_no==ref)|(Member.phone==phone)).first()
+                rawdate=row.get("Completion Time") or row.get("Date") or ""
+                try: td=datetime.fromisoformat(rawdate.replace("Z","+00:00")).replace(tzinfo=None) if rawdate else None
+                except ValueError: td=None
+                db.session.add(MpesaImport(transaction_code=code,transaction_date=td,phone=phone,member_no=ref,
+                    amount=amount,reference_text=ref,matched_member_id=member.id if member else None,status="Matched" if member else "Unmatched")); count+=1
+            audit("IMPORT","MpesaStatement",after={"count":count}); db.session.commit(); flash(f"Imported {count} unique M-Pesa rows.","success")
+        except Exception as e: db.session.rollback(); flash(f"Import failed: {e}","danger")
+        return redirect(url_for("reconciliation"))
+
+    @app.route("/reconciliation/allocate/<int:row_id>",methods=["POST"])
+    @roles_required("Administrator","Chairman","Accountant","Treasurer")
+    def mpesa_allocate(row_id):
+        row=db.get_or_404(MpesaImport,row_id); member=db.get_or_404(Member,request.form.get("member_id",type=int))
+        row.matched_member_id=member.id; row.status="Matched"; db.session.commit()
+        flash("M-Pesa receipt allocated to member. It has not been posted as a contribution.","success")
+        return redirect(url_for("reconciliation"))
+
     @app.cli.command("init-db")
     def init_db():
         db.create_all()
-        if not User.query.filter_by(username="admin").first():
-            u=User(username=os.getenv("BOOTSTRAP_ADMIN_USERNAME","admin"),full_name="System Administrator",role="Administrator")
+        bootstrap_username=os.getenv("BOOTSTRAP_ADMIN_USERNAME","admin")
+        if not User.query.filter_by(username=bootstrap_username).first():
+            u=User(username=bootstrap_username,full_name="System Administrator",role="Administrator")
             u.set_password(os.getenv("BOOTSTRAP_ADMIN_PASSWORD","ChangeMe-Immediately-2026"))
             db.session.add(u); db.session.commit()
-        if not Member.query.count():
-            for i in range(1,11):
-                db.session.add(Member(member_no=f"VK-{i:03}",full_name=f"Member {i:02}"))
-            db.session.commit()
         print("Database initialised. Change the bootstrap administrator password immediately.")
 
     return app

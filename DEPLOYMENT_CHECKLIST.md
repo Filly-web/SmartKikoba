@@ -1,16 +1,14 @@
-# Go-live checklist
-- [ ] Set strong SECRET_KEY and unique bootstrap admin password.
-- [ ] Create Render PostgreSQL and web service.
-- [ ] Initialize database once using `flask --app wsgi.py init-db`.
-- [ ] Create named users and assign roles; link Member users to their own member record.
-- [ ] Confirm member register and opening balance upload.
-- [ ] Accountant prepares opening balance batch and group opening M-Pesa amount.
-- [ ] Chairman reviews and approves opening batch.
-- [ ] Confirm contribution/penalty policy and SHARE/SOCIAL split in Settings.
-- [ ] Test loan TZS 600,000 at 10% flat over six months.
-- [ ] Test TZS 80,000 first repayment allocation.
-- [ ] Test a backdated receipt and compare transaction date to entry timestamp.
-- [ ] Test reversal and confirm original transaction remains in audit.
-- [ ] Test M-Pesa variance and confirm it is not auto-cleared.
-- [ ] Configure daily PostgreSQL backups and perform a restore drill.
-- [ ] Complete CSRF, security, PDF export and user acceptance hardening before production financial use.
+# Deployment checklist
+
+- [ ] Back up the existing Render PostgreSQL database and verify restore.
+- [ ] Compare live V1 schema to models in `app.py`; additive baseline does not alter existing columns.
+- [ ] Attach the existing database to the existing Render web service; do not provision a replacement.
+- [ ] Set unique SECRET_KEY and bootstrap credentials.
+- [ ] Deploy and run `flask db upgrade`; verify new tables and existing record counts.
+- [ ] Log in as each role and verify member ownership restrictions.
+- [ ] Import a test member workbook and test duplicate rejection.
+- [ ] Create a test loan, download receipt and schedule PDFs.
+- [ ] Record partial and full repayments; reconcile ledger totals.
+- [ ] Import a sample M-Pesa CSV and allocate an unmatched item.
+- [ ] Verify cashbook totals against source transactions.
+- [ ] Restore backup to a staging database and perform user acceptance tests before live posting.
