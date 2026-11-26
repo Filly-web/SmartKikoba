@@ -575,6 +575,9 @@ def create_app():
 
     return app
 
+# Expose the Flask instance for both `gunicorn app:app` and `gunicorn wsgi:app`.
+app = create_app()
+
 def excel_send(wb, filename):
     b=io.BytesIO(); wb.save(b); b.seek(0)
     return send_file(b,mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",as_attachment=True,download_name=filename)
