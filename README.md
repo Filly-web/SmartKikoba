@@ -21,7 +21,7 @@ Flask-based group savings and loan management portal. Currency: TZS. Production 
 
 ## V1.5 changes
 - The historical loan import accepts **all loans** as at 30 October 2026, including fully paid/closed loans and active loans.
-- Captures principal repaid and interest collected separately. The optional `Repayment History` sheet captures each actual receipt date, M-Koba transaction/receipt ID and total amount. Interest/principal components can be entered or left blank for automatic interest-first allocation. These dated receipts feed the M-Pesa movement reconciliation on their actual dates. If detailed history is unavailable for a loan, the importer posts its cumulative split at 30 October 2026 and retains the optional M-Koba reference.
+- Captures principal repaid and interest collected separately. The optional `Repayment History` sheet captures each actual receipt date, M-Koba transaction/receipt ID and total amount. Interest/principal components can be entered or left blank for automatic interest-first allocation. These dated receipts feed the M-Koba cash-flow reconciliation on their actual dates. If detailed history is unavailable for a loan, the importer posts its cumulative split at 30 October 2026 and retains the optional M-Koba reference.
 - Fully repaid loans are retained with Closed status; interest collected is posted to the LOAN_INTEREST category and principal recovery to LOAN_PRINCIPAL.
 - Fixes duplicate transaction references when a repayment spans multiple instalments. Each generated transaction now has a unique instalment-specific reference.
 - Validates the complete workbook before posting and commits the import atomically; duplicate loan numbers/references and inconsistent amounts reject the whole upload.
@@ -34,7 +34,7 @@ Flask-based group savings and loan management portal. Currency: TZS. Production 
 - The application builds the remaining monthly instalment schedule, allocates historic paid amounts to the earliest instalments (interest first), and records the historic loan disbursement and payment movements.
 - Loan pages show remaining instalments, overdue instalments, next due date and paid/overdue/future status for every instalment. Loan receipts continue to show the full schedule and current outstanding balances.
 - New historical contributions, loans and repayments after the 31 October opening date are uploaded through the historical workbook (from 1 November 2026 onward).
-- Added an Administrator-only **Clear group data** screen. It requires typing `CLEAR ALL GROUP DATA` and ticking a confirmation checkbox. It clears members, contributions, loans, loan instalments, opening batches, cash movements, M-Pesa reconciliations and contribution periods. It retains administrator accounts and group settings; non-administrator accounts are deactivated and unlinked. It is not run automatically on deployment.
+- Added an Administrator-only **Clear group data** screen. It requires typing `CLEAR ALL GROUP DATA` and ticking a confirmation checkbox. It clears members, contributions, loans, loan instalments, opening batches, cash movements, M-Koba reconciliations and contribution periods. It retains administrator accounts and group settings; non-administrator accounts are deactivated and unlinked. It is not run automatically on deployment.
 - Audit Trail functionality remains removed.
 
 ## Important accounting treatment
@@ -69,3 +69,12 @@ Python syntax compilation, source-contract checks and ZIP integrity are checked 
 ### Administrator-set passwords / PINs (V1.6)
 
 The Users & Roles screen no longer imposes a 10-character/digit minimum on the initial password/PIN field. The administrator can set a non-empty password/PIN of the required length; the value is stored as a Werkzeug password hash, not in plain text. Users enter the same value on the login screen. Choose a strong, non-obvious PIN/password and do not reuse personal banking PINs.
+
+
+## V1.8 — M-Koba expected cash balance
+- M-Koba is treated as the group's current wallet (same cash account as M-Pesa for this release). The dashboard displays one **Expected M-Koba Balance** for all user roles.
+- The expected balance is calculated as: opening M-Koba wallet balance + posted cash inflows − posted cash outflows.
+- Cash inflows include share contributions, social contributions, penalties collected, loan principal repayments and loan interest received. Cash outflows include loan disbursements and posted cash movements marked OUT (expenses, withdrawals and other payments). Other cash receipts are entered as CashMovement marked IN.
+- The 31 October 2026 opening-balance upload now includes an opening M-Koba wallet balance field. Enter the actual wallet balance at that date; it is the starting cash balance for subsequent movements. The latest approved opening wallet snapshot on or before a report date is used as the base, and only movements dated after that snapshot are added, preventing pre-opening history from being counted twice.
+- The dashboard does not calculate a separate net-asset/group-funds balance and does not subtract outstanding loans from wallet cash. Outstanding loans remain tracked separately in the loan module.
+- M-Koba reconciliation compares the expected wallet cash balance with the actual M-Koba statement balance. Differences remain visible and are not auto-adjusted.

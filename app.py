@@ -249,18 +249,45 @@ def apply_repayment(loan, amount, txn_date, reference, actor):
             remaining-=x
         if remaining<=0: break
     return amount
-def expected_mpesa(as_at):
-    opening=sum((money(x.mpesa_opening) for x in OpeningBatch.query.filter_by(status="Approved").filter(OpeningBatch.opening_date<=as_at)),Decimal("0"))
-    # Movement-based reconciliation, so principal repayments are cash receipts but not profit.
-    value=opening
-    for t in txn_query(as_at).all():
+def mkoba_cashflow(as_at):
+    """Return opening cash, cumulative cash inflows, outflows and expected closing cash.
+
+    The latest approved M-Koba snapshot on/before the report date is the starting
+    balance. Only movements dated AFTER that snapshot are added, preventing
+    historical transactions already included in the snapshot from being counted twice.
+    """
+    snapshot=(OpeningBatch.query.filter_by(status="Approved")
+        .filter(OpeningBatch.opening_date<=as_at)
+        .order_by(OpeningBatch.opening_date.desc(),OpeningBatch.created_at.desc()).first())
+    opening=money(snapshot.mpesa_opening) if snapshot else Decimal("0")
+    movement_start=snapshot.opening_date if snapshot else None
+    tq=txn_query(as_at)
+    mq=CashMovement.query.filter_by(status="Posted").filter(CashMovement.movement_date<=as_at)
+    if movement_start:
+        tq=tq.filter(Transaction.transaction_date>movement_start)
+        mq=mq.filter(CashMovement.movement_date>movement_start)
+    inflows=Decimal("0")
+    outflows=Decimal("0")
+    for t in tq.all():
         if t.category in ["SHARE","SOCIAL","PENALTY","LOAN_INTEREST","LOAN_PRINCIPAL"]:
-            value += money(t.amount)
+            inflows += money(t.amount)
         elif t.category=="LOAN_DISBURSEMENT":
-            value -= money(t.amount)
-    for m in CashMovement.query.filter_by(status="Posted").filter(CashMovement.movement_date<=as_at).all():
-        value += money(m.amount) if m.direction=="IN" else -money(m.amount)
-    return value
+            outflows += money(t.amount)
+    for m in mq.all():
+        if m.direction=="IN":
+            inflows += money(m.amount)
+        else:
+            outflows += money(m.amount)
+    return {"opening":opening,"inflows":inflows,"outflows":outflows,"closing":opening+inflows-outflows}
+
+def expected_mkoba(as_at):
+    """Expected M-Koba wallet balance; this is cash, not net assets or member funds."""
+    return mkoba_cashflow(as_at)["closing"]
+
+# Backward-compatible internal alias for existing integrations.
+def expected_mpesa(as_at):
+    return expected_mkoba(as_at)
+
 def create_app():
     app=Flask(__name__)
     app.config["SECRET_KEY"]=os.getenv("SECRET_KEY","dev-only-change-this-secret")
@@ -287,7 +314,7 @@ def create_app():
         principal=sum((loan_outstanding(l)[0] for l in loans),Decimal("0"))
         interest=sum((loan_outstanding(l)[1] for l in loans),Decimal("0"))
         interest_realised=sum((money(x.amount) for x in txn_query(d,mid).filter_by(category="LOAN_INTEREST").all()),Decimal("0"))
-        cash=expected_mpesa(d) if u.role!="Member" else None
+        cash=expected_mkoba(d)
         members=Member.query.filter_by(active=True).count() if not mid else 1
         return render_template("dashboard.html",t=t,loans=loans,principal=principal,interest=interest,
             interest_realised=interest_realised,cash=cash,members=members,as_at=d)
@@ -517,7 +544,7 @@ def create_app():
             if any(x not in idx for x in required): raise ValueError("Template columns do not match.")
             opening_date=date.fromisoformat(request.form.get("opening_date") or "2026-10-31")
             if opening_date != date(2026,10,31): raise ValueError("This release is configured for the opening balance date 31 October 2026.")
-            batch=OpeningBatch(batch_ref="OPEN-"+secrets.token_hex(5).upper(),opening_date=opening_date,prepared_by=current_user().id)
+            batch=OpeningBatch(batch_ref="OPEN-"+secrets.token_hex(5).upper(),opening_date=opening_date,mpesa_opening=money(request.form.get("mkoba_opening",0)),prepared_by=current_user().id)
             db.session.add(batch); db.session.flush()
             for row in ws.iter_rows(min_row=2,values_only=True):
                 if not row[idx["Member No"]]: continue
@@ -896,7 +923,7 @@ def create_app():
     @roles_required("Administrator","Chairman","Accountant")
     def reconciliation():
         if request.method=="POST":
-            d=date.fromisoformat(request.form["recon_date"]); exp=money(expected_mpesa(d)); actual=money(request.form["actual_balance"])
+            d=date.fromisoformat(request.form["recon_date"]); exp=money(expected_mkoba(d)); actual=money(request.form["actual_balance"])
             diff=actual-exp
             r=MpesaReconciliation(recon_date=d,expected_balance=exp,actual_balance=actual,difference=diff,
                 explanation=request.form.get("explanation"),status="Matched" if diff==0 else "Unmatched",prepared_by=current_user().id)
@@ -904,7 +931,7 @@ def create_app():
             db.session.commit(); flash("Reconciliation saved. Differences are not automatically adjusted.","success")
             return redirect(url_for("reconciliation"))
         return render_template("reconciliation.html",rows=MpesaReconciliation.query.order_by(MpesaReconciliation.recon_date.desc()).all(),
-            expected=expected_mpesa(date.today()))
+            expected=expected_mkoba(date.today()),cashflow=mkoba_cashflow(date.today()))
     @app.route("/reconciliation/<int:rid>/approve",methods=["POST"])
     @roles_required("Administrator","Chairman")
     def recon_approve(rid):
