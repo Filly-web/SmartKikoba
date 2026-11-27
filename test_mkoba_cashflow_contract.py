@@ -1,6 +1,21 @@
-{% extends "base.html" %}
-{% block content %}
-<div class="page-heading"><div><div class="eyebrow">ADMINISTRATION</div><h2 class="page-title">Clear group data</h2></div></div>
-<div class="alert alert-danger"><strong>Permanent and destructive action.</strong> This will delete all member records, contributions, loan records and instalment schedules, opening balances, cash movements, M-Koba reconciliations and contribution periods from the connected database. This cannot be undone from the portal.</div>
-<div class="panel" style="max-width:760px"><h5>What will be retained?</h5><ul><li>Administrator user account(s), so you can continue accessing the portal.</li><li>Group settings and application configuration.</li></ul><h5 class="mt-3">What will happen to other users?</h5><p>Non-administrator accounts will be deactivated and unlinked from member records. You can create fresh member and user records after the reset.</p><hr><form method="post"><label class="form-label">Type <strong>CLEAR ALL GROUP DATA</strong> to confirm</label><input class="form-control mb-3" name="confirmation" autocomplete="off" required><div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="understand" required><label class="form-check-label" for="understand">I understand this permanently deletes operational and financial data from the connected database.</label></div><button class="btn btn-danger" type="submit">Permanently clear group data</button> <a class="btn btn-outline-secondary" href="{{url_for('home')}}">Cancel</a></form></div>
-{% endblock %}
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+def test_repayment_history_mismatch_is_a_finding_not_hard_rejection():
+    source = (ROOT / "app.py").read_text()
+    assert "Repayment History totals TZS" in source
+    assert "soft_findings.append" in source
+    assert "if soft_findings and not approved_review:" in source
+    assert "history_usable" in source
+
+def test_optional_history_falls_back_to_cumulative_snapshot_once():
+    source = (ROOT / "app.py").read_text()
+    assert "if not hrows:" in source
+    assert "if history_usable.get(x[\"no\"],False) else []" in source
+    assert "only cumulative Loan Register totals will be posted" in source
+
+def test_money_parser_accepts_commas_tzs_and_dash():
+    source = (ROOT / "app.py").read_text()
+    assert 'raw.replace(",", "").replace("TZS", "").replace("tzs", "")' in source
+    assert 'raw in ("", "-")' in source

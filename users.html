@@ -1,13 +1,27 @@
-{% extends "base.html" %}{% block content %}
-<div class="d-flex flex-wrap justify-content-between align-items-center mb-4"><div><div class="eyebrow">OVERVIEW · {{ as_at.strftime('%d %B %Y') }}</div><h2 class="page-title">Financial Dashboard</h2><p class="text-muted mb-0">Member savings, lending performance and cash position.</p></div>
-<form class="d-flex gap-2"><input class="form-control" type="date" name="as_at" value="{{as_at.isoformat()}}"><button class="btn btn-outline-primary">View</button></form></div>
-<div class="row g-3 mb-4">
-{% for label,value,sub in [('Total SHARE',fmt(t.share),'Member share balances'),('Total SOCIAL',fmt(t.social),'Includes penalties once'),('Outstanding loan principal',fmt(principal),'Principal only'),('Realised loan interest',fmt(interest_realised),'Interest actually collected')] %}
-<div class="col-12 col-sm-6 col-xl-3"><div class="metric-card"><div class="metric-label">{{label}}</div><div class="metric-value">{{value}}</div><div class="metric-sub">{{sub}}</div></div></div>{% endfor %}
-<div class="col-12 col-sm-6 col-xl-4"><div class="metric-card border border-primary"><div class="metric-label">EXPECTED M-KOBA BALANCE</div><div class="metric-value">{{fmt(cash)}}</div><div class="metric-sub">Opening wallet balance + posted cash received − posted cash paid</div></div></div>{% if user.role!='Member' %}<div class="col-12 col-sm-6 col-xl-3"><div class="metric-card"><div class="metric-label">Active Members</div><div class="metric-value">{{members}}</div><div class="metric-sub">Group membership</div></div></div>{% endif %}
-</div>
-<div class="row g-3"><div class="col-lg-7"><div class="panel h-100"><div class="panel-head"><h5>Member financial position</h5><a href="{{url_for('reports')}}" class="small">View reports →</a></div><div class="table-responsive"><table class="table align-middle"><thead><tr><th>Category</th><th class="text-end">Amount (TZS)</th></tr></thead><tbody>
-<tr><td>SHARE contributions</td><td class="text-end">{{fmt(t.share)}}</td></tr><tr><td>SOCIAL (incl. penalties)</td><td class="text-end">{{fmt(t.social)}}</td></tr><tr><td>Penalties within SOCIAL</td><td class="text-end">{{fmt(t.penalty)}}</td></tr><tr><td>Outstanding loan principal</td><td class="text-end">{{fmt(principal)}}</td></tr><tr><td>Outstanding loan interest</td><td class="text-end">{{fmt(interest)}}</td></tr><tr><td>Realised interest collected</td><td class="text-end">{{fmt(interest_realised)}}</td></tr></tbody></table></div></div></div>
-<div class="col-lg-5"><div class="panel h-100"><div class="panel-head"><h5>Quick actions</h5></div><div class="quick-grid">
-{% if user.role!='Member' %}<a href="{{url_for('contributions')}}">＋ Record contribution</a><a href="{{url_for('loans')}}">＋ Create loan</a><a href="{{url_for('opening')}}">＋ Opening balances</a><a href="{{url_for('reconciliation')}}">⇄ M-Koba reconciliation</a><a href="{{url_for('cash_movements')}}">＋ Record M-Koba cash movement</a>{% endif %}<a href="{{url_for('reports')}}">▤ Financial reports</a></div><div class="note mt-3">The Expected M-Koba Balance is a cash-flow figure. Loan principal and interest repayments both increase wallet cash; loan disbursements and expenses reduce it.</div></div></div></div>
-{% endblock %}
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}VISIONARIES SMART KIKOBA{% endblock %}</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="{{ url_for('static',filename='style.css') }}" rel="stylesheet"></head>
+<body>
+{% if user %}<div class="app-shell">
+<aside class="sidebar" id="sidebar"><a class="brand" href="{{url_for('home')}}"><span class="brand-icon">V</span><span>VISIONARIES<small>SMART KIKOBA</small></span></a>
+<div class="side-caption">WORKSPACE</div><a class="side-link" href="{{url_for('home')}}">▦ <span>Dashboard</span></a>
+{% if user.role!='Member' %}<a class="side-link" href="{{url_for('members')}}">♙ <span>Members</span></a>{% endif %}
+<div class="side-caption">FINANCIAL OPERATIONS</div>
+{% if user.role!='Member' %}<a class="side-link" href="{{url_for('contributions')}}">＋ <span>Record contribution</span></a>{% endif %}
+<a class="side-link" href="{{url_for('contribution_reports')}}">▤ <span>Contribution reports</span></a>
+<a class="side-link" href="{{url_for('loans')}}">↗ <span>Loan tracking</span></a>
+<a class="side-link" href="{{url_for('loan_applications')}}">▣ <span>{% if user.role=='Member' %}Apply for a loan{% else %}Loan applications{% endif %}</span></a>
+{% if user.role!='Member' %}<div class="side-caption">GROUP FINANCE</div><a class="side-link" href="{{url_for('opening')}}">◷ <span>Opening & history</span></a><a class="side-link" href="{{url_for('reconciliation')}}">⇄ <span>M-Koba reconciliation</span></a><a class="side-link" href="{{url_for('cash_movements')}}">⇅ <span>Cash movements</span></a>{% endif %}
+<a class="side-link" href="{{url_for('reports')}}">▧ <span>Financial reports</span></a>
+{% if user.role=='Administrator' %}<div class="side-caption">ADMINISTRATION</div><a class="side-link" href="{{url_for('users')}}">⚙ <span>User control</span></a><a class="side-link" href="{{url_for('settings')}}">☷ <span>Group settings</span></a><a class="side-link" href="{{url_for('loan_opening_reviews')}}">✓ <span>Import reviews</span></a>{% endif %}
+<div class="sidebar-bottom"><div class="user-chip"><div class="avatar">{{user.full_name[:1]|upper}}</div><div><strong>{{user.full_name}}</strong><small>{{user.role}}</small></div></div><a class="signout" href="{{url_for('logout')}}">Sign out ↗</a></div></aside>
+<div class="main-area"><header class="top-header"><button class="menu-toggle" onclick="document.getElementById('sidebar').classList.toggle('show')">☰</button><div><span class="top-kicker">COOPERATIVE MANAGEMENT</span><strong>Member & Financial Services</strong></div><div class="header-right"><span class="online-dot"></span><span class="small text-muted">Secure workspace</span></div></header>
+<main class="content-area">
+{% else %}<main class="container-fluid px-3 px-lg-4 py-4">{% endif %}
+{% with messages=get_flashed_messages(with_categories=true) %}{% for cat,msg in messages %}<div class="alert alert-{{cat}} alert-dismissible fade show" role="alert">{{msg}}<button class="btn-close" data-bs-dismiss="alert"></button></div>{% endfor %}{% endwith %}
+{% block content %}{% endblock %}
+</main>{% if user %}</div></div>{% endif %}
+<footer class="app-footer">VISIONARIES SMART KIKOBA · V3.0 · TZS · Opening position: 31 October 2026</footer>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script></body></html>

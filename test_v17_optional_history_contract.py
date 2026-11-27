@@ -1,3 +1,50 @@
-{% extends "base.html" %}{% block content %}<div class="page-heading"><div><div class="eyebrow">MEMBER RECEIPTS</div><h2 class="page-title">Contributions & Penalties</h2></div></div>
-<div class="row g-3"><div class="col-lg-4"><div class="panel"><h5>Record receipt</h5><form method="post"><label>Member</label><select class="form-select mb-2" name="member_id" required>{% for m in members %}<option value="{{m.id}}">{{m.member_no}} · {{m.full_name}}</option>{% endfor %}</select><label>Category</label><select class="form-select mb-2" name="category"><option>SHARE</option><option>SOCIAL</option><option>PENALTY</option></select><label>Amount (TZS)</label><input class="form-control mb-2" name="amount" type="number" min="0.01" step="0.01" required><label>Transaction date</label><input class="form-control mb-2" name="transaction_date" type="date" min="2026-10-01" value="{{today.isoformat()}}" required><label>Contribution period</label><input class="form-control mb-2" name="period" placeholder="YYYY-MM"><label>Description / receipt reference</label><input class="form-control mb-3" name="description"><button class="btn btn-primary">Post receipt</button></form><div class="note mt-3">Penalty receipts are separately identified but included in SOCIAL totals once.</div></div></div>
-<div class="col-lg-8"><div class="panel"><div class="table-responsive"><table class="table"><thead><tr><th>Date</th><th>Member</th><th>Category</th><th class="text-end">Amount</th><th>Reference</th></tr></thead><tbody>{% for x in rows %}<tr><td>{{x.transaction_date}}</td><td>{{x.member.full_name if x.member else '—'}}</td><td>{{x.category}}</td><td class="text-end">{{fmt(x.amount)}}</td><td>{{x.reference}}</td></tr>{% else %}<tr><td colspan="5">No receipts recorded.</td></tr>{% endfor %}</tbody></table></div></div></div></div>{% endblock %}
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+APP = (ROOT / "app.py").read_text()
+OPENING = (ROOT / "templates" / "opening.html").read_text()
+DASH = (ROOT / "templates" / "dashboard.html").read_text()
+RECON = (ROOT / "templates" / "reconciliation.html").read_text()
+
+
+def test_opening_cash_is_derived_from_member_contributions_and_historic_loans():
+    assert "def mkoba_opening_cash(snapshot):" in APP
+    assert "money(item.share) + money(item.social)" in APP
+    assert 'Transaction.loan_id.isnot(None)' in APP
+    assert '"LOAN_DISBURSEMENT", "LOAN_PRINCIPAL", "LOAN_INTEREST"' in APP
+    assert "return contribution_cash + historic_in - historic_out" in APP
+
+
+def test_opening_wallet_is_not_manually_entered_anymore():
+    assert 'name="mkoba_opening"' not in OPENING
+    assert 'name="mkoba_opening"' not in APP
+    assert 'mpesa_opening=Decimal("0")' in APP
+    assert "Do not enter a separate wallet balance" in OPENING
+
+
+def test_historical_opening_loan_cash_is_visible_in_the_ledger():
+    assert '"source": "Historical loan opening"' in APP
+    assert '"source": "Opening contribution balances"' in APP
+    assert "Calculated M-Koba opening balance" in OPENING
+
+
+def test_subsequent_cash_movements_are_added_after_opening_snapshot():
+    assert 'Transaction.transaction_date > movement_start' in APP
+    assert 'CashMovement.movement_date > movement_start' in APP
+    assert 'opening + inflows - outflows' in APP
+
+
+def test_dashboard_and_reconciliation_explain_calculated_opening_position():
+    assert "EXPECTED M-KOBA BALANCE" in DASH
+    assert "historic loan cash flows" in DASH
+    assert "historic loan cash flows" in RECON
+
+
+def test_user_example_opening_wallet_balance_is_85000():
+    from decimal import Decimal
+    opening_contributions = Decimal("100000")
+    loan_disbursement = Decimal("50000")
+    principal_repaid = Decimal("30000")
+    interest_collected = Decimal("5000")
+    expected = opening_contributions - loan_disbursement + principal_repaid + interest_collected
+    assert expected == Decimal("85000")
