@@ -1,4 +1,4 @@
-# VISIONARIES SMART KIKOBA V3.0
+# VISIONARIES SMART KIKOBA V3.1
 
 Flask-based group savings and loan management portal. Currency: TZS. Production database: PostgreSQL on Render; local development defaults to SQLite.
 
@@ -119,7 +119,7 @@ V2.1 dashboard linkage correction: dashboard SHARE, SOCIAL and loan balances now
 
 ## V3.0 — 360° Cooperative Management update
 
-V3.0 retains the V2.1 financial models, opening balances, historical loan imports, transaction ledger, M-Koba calculations and manual leader loan entry. It adds:
+V3.1 retains the V2.1 financial models, opening balances, historical loan imports, transaction ledger, M-Koba calculations and manual leader loan entry. It adds:
 
 - A responsive sidebar workspace with simplified financial navigation.
 - Immediate posting for authorised contribution, loan, repayment and cash-movement entries; these do not wait for a separate posting approval. Loan applications remain a separate leader-decision workflow.
@@ -145,3 +145,14 @@ Authorised operational entries are posted immediately (status `Posted`) and upda
 ### Verification limitation
 
 Python syntax compilation and template parsing should be completed before release. Full Flask integration tests require installing the packages in `requirements.txt`; this build environment had no network access to install Flask, so it could not run the live Flask application or database integration tests here.
+
+
+## V3.1 additions
+- Member financial reports now export a detailed financial position, posted transactions, loan position and opening balances; member exports are scoped to the logged-in member.
+- Group settings support separate minimum monthly SHARE and SOCIAL amounts.
+- Contributions can be allocated across one or more of four monthly weeks; weekly obligation view calculates each week's shortfall.
+- In-app notifications cover new loan applications and member loan decisions.
+- Leaders can send all-member or individual-member portal messages; members can read messages in the portal.
+- Normal members retain view-only loan access; loan payment posting remains restricted to authorised leaders.
+
+Run `flask --app wsgi:app init-db` after deployment to create the new V3.1 tables. This uses `db.create_all()` and does not drop or reset existing tables or records. Back up the production database first.

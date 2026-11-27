@@ -28,6 +28,6 @@ def test_admin_user_delete_preserves_financial_records_and_protects_admin():
 
 
 def test_posting_is_immediate_and_application_is_separate():
-    assert 'db.session.commit(); flash("Contribution posted."' in APP
+    assert 'db.session.commit(); flash("Contribution posted and allocated to the selected week(s)."' in APP
     assert 'db.session.add(Transaction(reference=loan.loan_no+"-OUT"' in APP
     assert 'Submission does not create a loan' in (ROOT / "templates" / "loan_applications.html").read_text(encoding="utf-8")

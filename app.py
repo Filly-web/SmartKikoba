@@ -180,6 +180,37 @@ class CashMovement(db.Model):
 class Setting(db.Model):
     key = db.Column(db.String(80), primary_key=True)
     value = db.Column(db.String(250), nullable=False)
+
+class ContributionWeekAllocation(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    transaction_id = db.Column(db.Integer, db.ForeignKey("transaction.id", ondelete="CASCADE"), nullable=False, index=True)
+    member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=False, index=True)
+    period = db.Column(db.String(7), nullable=False, index=True)
+    category = db.Column(db.String(20), nullable=False)
+    week_no = db.Column(db.Integer, nullable=False)
+    amount = db.Column(db.Numeric(14,2), nullable=False)
+    transaction = db.relationship("Transaction")
+    member = db.relationship("Member")
+
+class InAppNotification(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    recipient_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    title = db.Column(db.String(180), nullable=False)
+    body = db.Column(db.String(1000), nullable=False)
+    target_url = db.Column(db.String(500), default="/")
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    read_at = db.Column(db.DateTime)
+    recipient = db.relationship("User")
+
+class PortalMessage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    sender_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    recipient_member_id = db.Column(db.Integer, db.ForeignKey("member.id"))
+    subject = db.Column(db.String(180), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    sender = db.relationship("User")
+    recipient_member = db.relationship("Member")
 def current_user():
     uid = session.get("user_id")
     return db.session.get(User, uid) if uid else None
@@ -413,7 +444,9 @@ def create_app():
     db.init_app(app); migrate.init_app(app,db)
     @app.context_processor
     def inject():
-        return {"user":current_user(),"fmt":fmt,"today":date.today()}
+        u=current_user()
+        unread=InAppNotification.query.filter_by(recipient_user_id=u.id,read_at=None).count() if u else 0
+        return {"user":u,"fmt":fmt,"today":date.today(),"unread_notifications":unread}
     @app.route("/")
     def home():
         if not current_user(): return redirect(url_for("login"))
@@ -539,14 +572,26 @@ def create_app():
             if amt<=0: flash("Amount must be positive.","danger"); return redirect(url_for("contributions"))
             cat=request.form["category"]
             if cat not in ["SHARE","SOCIAL","PENALTY"]: abort(400)
-            period=request.form.get("period") or d.strftime("%Y-%m")
+            period=d.strftime("%Y-%m")
             cp=ContributionPeriod.query.filter_by(period=period).first()
             if not cp: cp=ContributionPeriod(period=period); db.session.add(cp); db.session.flush()
             ref="CON-"+secrets.token_hex(7).upper()
-            tx=Transaction(reference=ref,member_id=int(request.form["member_id"]),period_id=cp.id,txn_type="Receipt",
+            member_id=int(request.form["member_id"])
+            if not Member.query.filter_by(id=member_id,active=True).first(): raise ValueError("Select an active member.")
+            weeks=sorted({int(x) for x in request.form.getlist("weeks") if x in {"1","2","3","4"}})
+            if cat in ["SHARE","SOCIAL"] and not weeks: raise ValueError("Select at least one of the four contribution weeks.")
+            if cat in ["SHARE","SOCIAL"] and len(weeks)>4: raise ValueError("Select between one and four weeks.")
+            tx=Transaction(reference=ref,member_id=member_id,period_id=cp.id,txn_type="Receipt",
                 category=cat,amount=amt,transaction_date=d,description=request.form.get("description"),created_by=current_user().id)
-            db.session.add(tx)
-            db.session.commit(); flash("Contribution posted.","success"); return redirect(url_for("contributions"))
+            db.session.add(tx); db.session.flush()
+            if cat in ["SHARE","SOCIAL"]:
+                allocation=(amt/Decimal(len(weeks))).quantize(CENT,rounding=ROUND_HALF_UP)
+                distributed=Decimal("0")
+                for idx,wk in enumerate(weeks):
+                    part=amt-distributed if idx==len(weeks)-1 else allocation
+                    distributed+=part
+                    db.session.add(ContributionWeekAllocation(transaction_id=tx.id,member_id=member_id,period=period,category=cat,week_no=wk,amount=part))
+            db.session.commit(); flash("Contribution posted and allocated to the selected week(s).","success"); return redirect(url_for("contributions"))
         q=Transaction.query.filter(Transaction.category.in_(["SHARE","SOCIAL","PENALTY"])).order_by(Transaction.transaction_date.desc())
         if current_user().role=="Member": q=q.filter_by(member_id=current_user().member_id)
         return render_template("contributions.html",members=Member.query.filter_by(active=True).all(),rows=q.limit(200).all())
@@ -634,7 +679,12 @@ def create_app():
                     appn=LoanApplication(application_no="APP-"+secrets.token_hex(5).upper(),member_id=u.member_id,
                         requested_amount=amount,purpose=purpose,repayment_months=months,preferred_network=network,
                         mobile_number=phone,preferred_first_due=due,submitted_by=u.id)
-                    db.session.add(appn); db.session.commit()
+                    db.session.add(appn); db.session.flush()
+                    leaders=User.query.filter(User.active.is_(True),User.role.in_(["Administrator","Chairman","Secretary","Treasurer"])).all()
+                    for leader in leaders:
+                        db.session.add(InAppNotification(recipient_user_id=leader.id,title="New loan application",
+                            body=f"{appn.member.full_name} submitted application {appn.application_no} for TZS {fmt(amount)}.",target_url=url_for("loan_applications")))
+                    db.session.commit()
                     flash("Loan application submitted successfully. A group leader will review it.","success")
                 except Exception as e:
                     db.session.rollback(); flash(str(e),"danger")
@@ -657,6 +707,8 @@ def create_app():
             if decision=="reject":
                 if not notes: raise ValueError("Provide a reason when rejecting an application.")
                 a.status="Rejected"; a.leader_notes=notes; a.reviewed_by=current_user().id; a.reviewed_at=datetime.utcnow()
+                for member_user in User.query.filter_by(member_id=a.member_id,active=True).all():
+                    db.session.add(InAppNotification(recipient_user_id=member_user.id,title="Loan application decision",body=f"Your application {a.application_no} was rejected. Reason: {notes}",target_url=url_for("loan_applications")))
                 db.session.commit(); flash("Loan application rejected. The member can see the decision and reason.","success")
             elif decision=="approve":
                 amount=money(request.form.get("approved_amount") or a.requested_amount)
@@ -675,6 +727,8 @@ def create_app():
                     description=f"Loan disbursement from approved application {a.application_no}; mobile network {a.preferred_network}",created_by=current_user().id))
                 a.status="Approved"; a.approved_amount=amount; a.approved_rate=rate; a.leader_notes=notes
                 a.reviewed_by=current_user().id; a.reviewed_at=datetime.utcnow()
+                for member_user in User.query.filter_by(member_id=a.member_id,active=True).all():
+                    db.session.add(InAppNotification(recipient_user_id=member_user.id,title="Loan application approved",body=f"Your application {a.application_no} was approved. Loan reference: {loan.loan_no}.",target_url=url_for("loans")))
                 db.session.commit(); flash(f"Application approved and loan {loan.loan_no} created in Loan Tracking.","success")
             else: raise ValueError("Select Approve or Reject.")
         except Exception as e:
@@ -1161,6 +1215,7 @@ def create_app():
     @login_required
     def reports():
         u=current_user(); mid=u.member_id if u.role=="Member" else request.args.get("member_id",type=int)
+        if u.role=="Member" and not mid: abort(403)
         try: d=date.fromisoformat(request.args.get("as_at","")) if request.args.get("as_at") else date.today()
         except ValueError: d=date.today()
         t=totals(d,mid)
@@ -1173,16 +1228,40 @@ def create_app():
     def export_report():
         u=current_user(); mid=u.member_id if u.role=="Member" else request.args.get("member_id",type=int)
         try: d=date.fromisoformat(request.args.get("as_at","")) if request.args.get("as_at") else date.today()
-        except ValueError: d=date.today()
+        except ValueError: abort(400)
+        if u.role=="Member" and not mid: abort(403)
         wb=Workbook(); ws=wb.active; ws.title="Financial Position"
-        t=totals(d,mid)
-        ws.append(["VISIONARIES SMART KIKOBA","As at",d.isoformat()])
-        ws.append(["Category","Amount (TZS)"])
+        ws.append(["VISIONARIES SMART KIKOBA","Member / Group Financial Report"])
+        ws.append(["As at",d.isoformat()])
+        if mid:
+            m=db.get_or_404(Member,mid); ws.append(["Member No",m.member_no]); ws.append(["Member Name",m.full_name])
+        t=totals(d,mid); ws.append([]); ws.append(["Category","Amount (TZS)"])
         for k,v in t.items(): ws.append([k.replace("_"," ").title(),float(v)])
-        tx=wb.create_sheet("Transactions"); tx.append(["Reference","Transaction Date","Entry Date/Time","Member","Category","Amount","Status","Description"])
-        q=txn_query(d,mid).order_by(Transaction.transaction_date)
-        for x in q.all(): tx.append([x.reference,x.transaction_date.isoformat(),x.entry_date.isoformat(),x.member.full_name if x.member else "",x.category,float(x.amount),x.status,x.description])
-        return excel_send(wb,f"Kikoba_Report_{d.isoformat()}.xlsx")
+        tx=wb.create_sheet("Contribution Transactions"); tx.append(["Reference","Date","Member No","Member","Category","Amount (TZS)","Status","Description"])
+        q=Transaction.query.filter(Transaction.status=="Posted",Transaction.transaction_date<=d)
+        if mid: q=q.filter(Transaction.member_id==mid)
+        for x in q.order_by(Transaction.transaction_date,Transaction.id).all():
+            tx.append([x.reference,x.transaction_date.isoformat(),x.member.member_no if x.member else "",x.member.full_name if x.member else "",x.category,float(x.amount),x.status,x.description or ""])
+        loanws=wb.create_sheet("Loan Position"); loanws.append(["Loan No","Member No","Member","Principal","Interest","Principal Outstanding","Interest Outstanding","Status"])
+        lq=Loan.query
+        if mid: lq=lq.filter_by(member_id=mid)
+        for loan in lq.order_by(Loan.disbursement_date).all():
+            po,io=loan_outstanding(loan)
+            loanws.append([loan.loan_no,loan.member.member_no,loan.member.full_name,float(loan.principal),float(loan.interest_total),float(po),float(io),loan.status])
+        opening=wb.create_sheet("Opening Balances"); opening.append(["Member No","Member","SHARE","SOCIAL","PENALTY","Loan Principal","Loan Interest"])
+        snap=mkoba_snapshot(d)
+        if snap:
+            oq=OpeningBalance.query.filter_by(batch_id=snap.id)
+            if mid: oq=oq.filter_by(member_id=mid)
+            for ob in oq.all(): opening.append([ob.member.member_no,ob.member.full_name,float(ob.share),float(ob.social),float(ob.penalty),float(ob.loan_principal),float(ob.loan_interest)])
+        for sh in wb.worksheets:
+            sh.freeze_panes="A2"; sh.auto_filter.ref=sh.dimensions
+            for col in sh.columns:
+                letter=col[0].column_letter
+                sh.column_dimensions[letter].width=min(max(max((len(str(c.value or "")) for c in col),default=10)+2,14),42)
+        suffix=("Member_"+str(mid)+"_" if mid else "Group_")
+        return excel_send(wb,f"Kikoba_{suffix}Financial_Report_{d.isoformat()}.xlsx")
+
     @app.route("/contributions/reports")
     @login_required
     def contribution_reports():
@@ -1201,6 +1280,7 @@ def create_app():
     @login_required
     def contribution_report_xlsx():
         u=current_user(); start_s=request.args.get("start"); end_s=request.args.get("end")
+        if u.role=="Member" and not u.member_id: abort(403)
         try:
             start=date.fromisoformat(start_s) if start_s else None
             end=date.fromisoformat(end_s) if end_s else None
@@ -1213,16 +1293,37 @@ def create_app():
         ws.append(["Period",f"{start or 'All dates'} to {end or 'Today'}"])
         ws.append(["Member No","Member Name","SHARE (TZS)","SOCIAL (TZS)","PENALTY (TZS)","TOTAL (TZS)"])
         sums={}
+        if mid:
+            member=db.get_or_404(Member,mid); sums[(member.member_no,member.full_name)]={"SHARE":Decimal("0"),"SOCIAL":Decimal("0"),"PENALTY":Decimal("0")}
+        else:
+            for member in Member.query.order_by(Member.member_no).all(): sums[(member.member_no,member.full_name)]={"SHARE":Decimal("0"),"SOCIAL":Decimal("0"),"PENALTY":Decimal("0")}
         for x in rows:
             key=(x.member.member_no if x.member else "",x.member.full_name if x.member else "Unassigned")
             sums.setdefault(key,{"SHARE":Decimal("0"),"SOCIAL":Decimal("0"),"PENALTY":Decimal("0")})
             sums[key][x.category]+=money(x.amount)
+        if start is None:
+            snapshot=mkoba_snapshot(end or date.today())
+            if snapshot:
+                opening_q=OpeningBalance.query.filter_by(batch_id=snapshot.id)
+                if mid: opening_q=opening_q.filter_by(member_id=mid)
+                for ob in opening_q.all():
+                    key=(ob.member.member_no,ob.member.full_name)
+                    sums.setdefault(key,{"SHARE":Decimal("0"),"SOCIAL":Decimal("0"),"PENALTY":Decimal("0")})
+                    sums[key]["SHARE"]+=money(ob.share); sums[key]["SOCIAL"]+=money(ob.social)
         for (no,name),v in sorted(sums.items()):
             ws.append([no,name,float(v["SHARE"]),float(v["SOCIAL"]),float(v["PENALTY"]),float(sum(v.values()))])
         ws.append(["GROUP TOTAL","",sum(float(v["SHARE"]) for v in sums.values()),sum(float(v["SOCIAL"]) for v in sums.values()),sum(float(v["PENALTY"]) for v in sums.values()),sum(float(sum(v.values())) for v in sums.values())])
         detail=wb.create_sheet("Transaction Details")
         detail.append(["Date","Member No","Member Name","Category","Amount (TZS)","Reference","Description"])
         for x in rows: detail.append([x.transaction_date.isoformat(),x.member.member_no if x.member else "",x.member.full_name if x.member else "",x.category,float(x.amount),x.reference,x.description or ""])
+        if start is None:
+            opening_sheet=wb.create_sheet("Opening Contributions")
+            opening_sheet.append(["Opening Date","Member No","Member Name","SHARE (TZS)","SOCIAL (TZS)"])
+            snapshot=mkoba_snapshot(end or date.today())
+            if snapshot:
+                opening_q=OpeningBalance.query.filter_by(batch_id=snapshot.id)
+                if mid: opening_q=opening_q.filter_by(member_id=mid)
+                for ob in opening_q.all(): opening_sheet.append([snapshot.opening_date.isoformat(),ob.member.member_no,ob.member.full_name,float(ob.share),float(ob.social)])
         for sheet in wb.worksheets:
             sheet.freeze_panes="A4"; sheet.auto_filter.ref=sheet.dimensions
             for col in sheet.columns:
@@ -1241,6 +1342,7 @@ def create_app():
             if start and end and start>end: raise ValueError()
         except ValueError: abort(400)
         mid=u.member_id if u.role=="Member" else request.args.get("member_id",type=int)
+        if u.role=="Member" and not mid: abort(403)
         rows=contribution_report_rows(start,end,mid)
         buff=io.BytesIO(); pdf=canvas.Canvas(buff,pagesize=A4); width,height=A4
         y=height-48; pdf.setFont("Helvetica-Bold",15); pdf.drawString(40,y,"VISIONARIES SMART KIKOBA")
@@ -1251,9 +1353,22 @@ def create_app():
         for label,x in headers: pdf.drawString(x,y,label)
         y-=10; pdf.line(40,y,555,y); y-=15; pdf.setFont("Helvetica",8)
         sums={}
+        if mid:
+            member=db.get_or_404(Member,mid); sums[f"{member.member_no} {member.full_name}"]={"SHARE":Decimal("0"),"SOCIAL":Decimal("0"),"PENALTY":Decimal("0")}
+        else:
+            for member in Member.query.order_by(Member.member_no).all(): sums[f"{member.member_no} {member.full_name}"]={"SHARE":Decimal("0"),"SOCIAL":Decimal("0"),"PENALTY":Decimal("0")}
         for x in rows:
             key=(x.member.member_no+" "+x.member.full_name) if x.member else "Unassigned"
             sums.setdefault(key,{"SHARE":Decimal("0"),"SOCIAL":Decimal("0"),"PENALTY":Decimal("0")})[x.category]+=money(x.amount)
+        if start is None:
+            snapshot=mkoba_snapshot(end or date.today())
+            if snapshot:
+                opening_q=OpeningBalance.query.filter_by(batch_id=snapshot.id)
+                if mid: opening_q=opening_q.filter_by(member_id=mid)
+                for ob in opening_q.all():
+                    key=f"{ob.member.member_no} {ob.member.full_name}"
+                    sums.setdefault(key,{"SHARE":Decimal("0"),"SOCIAL":Decimal("0"),"PENALTY":Decimal("0")})
+                    sums[key]["SHARE"]+=money(ob.share); sums[key]["SOCIAL"]+=money(ob.social)
         for name,v in sums.items():
             if y<55: pdf.showPage(); y=height-50; pdf.setFont("Helvetica",8)
             pdf.drawString(40,y,name[:40])
@@ -1305,23 +1420,108 @@ def create_app():
             LoanImportReview.query.filter_by(reviewed_by=target.id).update({LoanImportReview.reviewed_by:None},synchronize_session=False)
             LoanApplication.query.filter_by(submitted_by=target.id).update({LoanApplication.submitted_by:None},synchronize_session=False)
             LoanApplication.query.filter_by(reviewed_by=target.id).update({LoanApplication.reviewed_by:None},synchronize_session=False)
+            InAppNotification.query.filter_by(recipient_user_id=target.id).delete(synchronize_session=False)
+            PortalMessage.query.filter_by(sender_user_id=target.id).delete(synchronize_session=False)
             db.session.delete(target); db.session.commit()
             flash("User account permanently deleted. Financial records were retained; creator/reviewer links for this account were cleared.","success")
         except Exception as e:
             db.session.rollback(); flash(f"User deletion failed; no changes were committed: {e}","danger")
         return redirect(url_for("users"))
 
+    @app.route("/contributions/weekly-status")
+    @login_required
+    def contribution_weekly_status():
+        u=current_user(); period=request.args.get("period") or date.today().strftime("%Y-%m")
+        try: date.fromisoformat(period+"-01")
+        except ValueError: abort(400)
+        members=[Member.query.filter_by(id=u.member_id).first()] if u.role=="Member" and u.member_id else Member.query.filter_by(active=True).order_by(Member.member_no).all()
+        if u.role=="Member" and not u.member_id: abort(403)
+        share_setting=Setting.query.filter_by(key="minimum_share").first(); social_setting=Setting.query.filter_by(key="minimum_social").first()
+        minimums={"SHARE":money(share_setting.value if share_setting else 0),"SOCIAL":money(social_setting.value if social_setting else 0)}
+        month_start=date.fromisoformat(period+"-01")
+        month_end=date(month_start.year,month_start.month,monthrange(month_start.year,month_start.month)[1])
+        month_closed=date.today()>month_end
+        data=[]
+        for m in members:
+            for cat in ["SHARE","SOCIAL"]:
+                week_rows=[]
+                for wk in range(1,5):
+                    allocations=ContributionWeekAllocation.query.filter_by(member_id=m.id,period=period,category=cat,week_no=wk).all()
+                    paid=sum((money(x.amount) for x in allocations),Decimal("0"))
+                    # Legacy receipts without explicit week allocation are assigned to the
+                    # calendar week in which they were posted, avoiding a blank historical view.
+                    month_start=date.fromisoformat(period+"-01"); month_end=date(month_start.year,month_start.month,monthrange(month_start.year,month_start.month)[1])
+                    legacy=Transaction.query.filter_by(member_id=m.id,category=cat,status="Posted").filter(Transaction.transaction_date>=month_start,Transaction.transaction_date<=month_end).all()
+                    for tx in legacy:
+                        has_alloc=ContributionWeekAllocation.query.filter_by(transaction_id=tx.id).first()
+                        tx_week=min(4,((tx.transaction_date.day-1)//7)+1)
+                        if not has_alloc and tx_week==wk: paid+=money(tx.amount)
+                    due=(minimums[cat]/Decimal("4")).quantize(CENT)
+                    week_rows.append({"week":wk,"paid":paid,"due":due,"outstanding":max(Decimal("0"),due-paid)})
+                total_paid=sum((x["paid"] for x in week_rows),Decimal("0")); outstanding=sum((x["outstanding"] for x in week_rows),Decimal("0"))
+                data.append({"member":m,"category":cat,"weeks":week_rows,"required":minimums[cat],"paid":total_paid,"outstanding":outstanding})
+                month_end=date(month_start.year,month_start.month,monthrange(month_start.year,month_start.month)[1])
+                if date.today()>month_end and outstanding>0:
+                    body=f"{m.full_name} has unpaid {cat} contribution of TZS {fmt(outstanding)} for {period}."
+                    recipients=User.query.filter(User.active.is_(True),User.role.in_(["Administrator","Chairman","Secretary","Treasurer"])).all()
+                    recipients += User.query.filter_by(member_id=m.id,active=True).all()
+                    for recipient in recipients:
+                        exists=InAppNotification.query.filter_by(recipient_user_id=recipient.id,title="Month-end contribution shortfall",body=body).first()
+                        if not exists: db.session.add(InAppNotification(recipient_user_id=recipient.id,title="Month-end contribution shortfall",body=body,target_url=url_for("contribution_weekly_status",period=period)))
+        if db.session.new: db.session.commit()
+        return render_template("weekly_status.html",period=period,data=data,month_closed=month_closed)
+
+    @app.route("/notifications")
+    @login_required
+    def notifications():
+        rows=InAppNotification.query.filter_by(recipient_user_id=current_user().id).order_by(InAppNotification.created_at.desc()).limit(200).all()
+        return render_template("notifications.html",rows=rows)
+
+    @app.route("/notifications/<int:nid>/read",methods=["POST"])
+    @login_required
+    def notification_read(nid):
+        n=InAppNotification.query.filter_by(id=nid,recipient_user_id=current_user().id).first_or_404()
+        n.read_at=datetime.utcnow(); db.session.commit()
+        return redirect(n.target_url or url_for("notifications"))
+
+    @app.route("/messages",methods=["GET","POST"])
+    @login_required
+    def messages():
+        u=current_user()
+        if request.method=="POST":
+            if u.role not in ["Administrator","Chairman","Secretary","Treasurer"]: abort(403)
+            subject=request.form.get("subject","").strip(); body=request.form.get("body","").strip(); recipient=request.form.get("recipient_member_id","").strip()
+            if not subject or not body: flash("Enter a subject and message.","danger")
+            else:
+                targets=Member.query.filter_by(active=True).all() if recipient=="all" else [db.get_or_404(Member,int(recipient))]
+                msg=PortalMessage(sender_user_id=u.id,recipient_member_id=None if recipient=="all" else targets[0].id,subject=subject,body=body)
+                db.session.add(msg); db.session.flush()
+                for m in targets:
+                    for member_user in User.query.filter_by(member_id=m.id,active=True).all():
+                        db.session.add(InAppNotification(recipient_user_id=member_user.id,title="New message from group leaders",body=subject,target_url=url_for("messages")))
+                db.session.commit(); flash("Message sent and member notifications created.","success")
+            return redirect(url_for("messages"))
+        if u.role=="Member":
+            rows=PortalMessage.query.filter((PortalMessage.recipient_member_id==None)|(PortalMessage.recipient_member_id==u.member_id)).order_by(PortalMessage.created_at.desc()).all()
+        else: rows=PortalMessage.query.order_by(PortalMessage.created_at.desc()).all()
+        return render_template("messages.html",rows=rows,members=Member.query.filter_by(active=True).order_by(Member.member_no).all())
+
     @app.route("/settings",methods=["GET","POST"])
     @roles_required("Administrator")
     def settings():
         if request.method=="POST":
-            for key in ["minimum_contribution","share_pct","social_pct","penalty_method","penalty_rate","penalty_fixed","grace_days","deadline_day"]:
+            try:
+                if money(request.form.get("minimum_share",0))<0 or money(request.form.get("minimum_social",0))<0:
+                    raise ValueError("Monthly SHARE and SOCIAL minimums cannot be negative.")
+            except Exception as e:
+                flash(str(e),"danger"); return redirect(url_for("settings"))
+            for key in ["minimum_contribution","minimum_share","minimum_social","share_pct","social_pct","penalty_method","penalty_rate","penalty_fixed","grace_days","deadline_day"]:
                 s=db.session.get(Setting,key)
                 if not s: s=Setting(key=key,value=request.form.get(key,"")); db.session.add(s)
                 else: s.value=request.form.get(key,"")
             db.session.commit(); flash("Configuration saved.","success"); return redirect(url_for("settings"))
         vals={x.key:x.value for x in Setting.query.all()}
-        vals.setdefault("minimum_contribution","100000"); vals.setdefault("share_pct","50"); vals.setdefault("social_pct","50")
+        vals.setdefault("minimum_contribution","100000"); vals.setdefault("minimum_share","50000"); vals.setdefault("minimum_social","50000"); vals.setdefault("share_pct","50"); vals.setdefault("social_pct","50")
         vals.setdefault("penalty_method","percentage"); vals.setdefault("penalty_rate","30"); vals.setdefault("penalty_fixed","0")
         vals.setdefault("grace_days","0"); vals.setdefault("deadline_day","30")
         return render_template("settings.html",vals=vals)
@@ -1353,6 +1553,9 @@ def create_app():
                 # Remove applications first because approved applications may reference loans.
                 LoanApplication.query.delete(synchronize_session=False)
                 LoanImportReview.query.delete(synchronize_session=False)
+                ContributionWeekAllocation.query.delete(synchronize_session=False)
+                PortalMessage.query.delete(synchronize_session=False)
+                InAppNotification.query.delete(synchronize_session=False)
                 Transaction.query.delete(synchronize_session=False)
                 LoanInstallment.query.delete(synchronize_session=False)
                 Loan.query.delete(synchronize_session=False)
