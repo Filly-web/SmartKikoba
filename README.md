@@ -156,3 +156,6 @@ Python syntax compilation and template parsing should be completed before releas
 - Normal members retain view-only loan access; loan payment posting remains restricted to authorised leaders.
 
 Run `flask --app wsgi:app init-db` after deployment to create the new V3.1 tables. This uses `db.create_all()` and does not drop or reset existing tables or records. Back up the production database first.
+
+### Existing database notification schema repair
+The `init-db` command includes an additive compatibility repair for existing `in_app_notification` tables missing `recipient_user_id`. It adds the column and index, and copies legacy `user_id` values where that column exists. It does not drop tables or clear records. Keep the Render start command as `flask --app wsgi.py init-db && gunicorn wsgi:app`.

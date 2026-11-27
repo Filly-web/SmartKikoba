@@ -42,3 +42,6 @@ V3.0 user deletion preserves financial records and clears only references to the
 7. Test member financial report exports, leader loan application notifications, and leader-to-member messages using test accounts.
 8. Normal members can view their own loans but cannot post, allocate, edit or reverse loan payments. Only authorised leaders can post repayments.
 9. Do not run Clear All Records during an upgrade.
+
+## V3.1.1 notification schema compatibility fix
+If upgrading an existing V3.0/V3.1 database where `in_app_notification` already exists, the `init-db` command now adds the missing `recipient_user_id` column and index without dropping or clearing notification or financial records. Ensure the Render Start Command runs `flask --app wsgi.py init-db && gunicorn wsgi:app` so the additive schema repair runs before the web worker starts.
