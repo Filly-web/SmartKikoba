@@ -1,11 +1,19 @@
-# VISIONARIES SMART KIKOBA V1.3
+# VISIONARIES SMART KIKOBA V1.4
 
 Flask-based group savings and loan management portal. Currency: TZS. Production database: PostgreSQL on Render; local development defaults to SQLite.
+
+## V1.4 changes
+- The historical loan import accepts **all loans** as at 30 October 2026, including fully paid/closed loans and active loans.
+- Captures principal repaid and interest collected separately. The optional `Repayment History` sheet captures each actual receipt date, M-Koba transaction/receipt ID and total amount. Interest/principal components can be entered or left blank for automatic interest-first allocation. These dated receipts feed the M-Pesa movement reconciliation on their actual dates. If detailed history is unavailable for a loan, the importer posts its cumulative split at 30 October 2026 and retains the optional M-Koba reference.
+- Fully repaid loans are retained with Closed status; interest collected is posted to the LOAN_INTEREST category and principal recovery to LOAN_PRINCIPAL.
+- Fixes duplicate transaction references when a repayment spans multiple instalments. Each generated transaction now has a unique instalment-specific reference.
+- Validates the complete workbook before posting and commits the import atomically; duplicate loan numbers/references and inconsistent amounts reject the whole upload.
+- The importer remains backward-compatible with the previous V1.3 Outstanding Loans template headers.
 
 ## V1.3 changes
 - Opening member balances can be uploaded as at **31 October 2026**.
 - Existing outstanding loans can be uploaded separately as at **30 October 2026**, one loan per Excel row.
-- Loan upload captures original loan date, original principal, flat interest rate, total instalments, fully paid instalments, cumulative amount paid to 30 October, and first due date.
+- Loan upload captures original loan date, original principal, flat interest rate, optional actual total interest charged, total instalments, fully paid instalments, cumulative amount paid to 30 October, and first due date.
 - The application builds the remaining monthly instalment schedule, allocates historic paid amounts to the earliest instalments (interest first), and records the historic loan disbursement and payment movements.
 - Loan pages show remaining instalments, overdue instalments, next due date and paid/overdue/future status for every instalment. Loan receipts continue to show the full schedule and current outstanding balances.
 - New historical contributions, loans and repayments after the 31 October opening date are uploaded through the historical workbook (from 1 November 2026 onward).
@@ -16,8 +24,9 @@ Flask-based group savings and loan management portal. Currency: TZS. Production 
 1. Upload the member contribution opening position dated **31 October 2026**.
 2. Upload each outstanding loan with the loan register dated **30 October 2026**.
 3. Do **not** enter aggregate loan principal or loan interest in the member opening-balance worksheet. The separate loan register creates each loan and its remaining balance. This prevents double counting. Keep the `Loan Principal` and `Loan Interest` columns at zero in the opening-balance sheet.
-4. Enter the actual cumulative amount received up to 30 October 2026 in the loan register. `Instalments Paid` means the number of completely settled instalments. A partial payment after those complete instalments is included in `Amount Paid`. The amount paid must be consistent with the number of fully paid instalments.
-5. After the opening position is approved, upload contributions, new loans and repayments dated 1 November 2026 onward using the Historical Transactions workbook. Use unique transaction references and the same loan number on loan and repayment rows.
+4. Enter each loan's total amount received up to 30 October 2026. Split it between `Interest Collected` and `Principal Repaid`; their sum must equal `Total Amount Paid`. The optional `Total Interest Charged` overrides the flat-rate calculation where the actual agreed interest differs. `Instalments Paid` is the count of fully settled instalments; fully settled loans must be marked `Closed` even if they were settled before the final scheduled date.
+5. For transaction-date M-Koba reconciliation, fill the optional `Repayment History` sheet with each actual receipt date, M-Koba transaction ID and amount. The rows for each loan must add up to the loan register's total paid amount. Interest/principal components may be left blank for automatic interest-first allocation, or entered as a pair. If detailed receipt history is unavailable for a loan, leave it out of that sheet; the system records its cumulative interest and principal totals on 30 October 2026. Those summary-only loans will not be matched by individual payment date.
+6. After the opening position is approved, upload contributions, new loans and repayments dated 1 November 2026 onward using the Historical Transactions workbook. Use unique transaction references and the same loan number on loan and repayment rows.
 
 ## Local setup
 1. Python 3.12 or later recommended.

@@ -1,4 +1,4 @@
-import os, secrets, csv, io
+import os, secrets, csv, io, hashlib
 from datetime import datetime, date, timedelta
 from calendar import monthrange
 from decimal import Decimal, ROUND_HALF_UP
@@ -207,22 +207,22 @@ def apply_repayment(loan, amount, txn_date, reference, actor):
     if amount <= 0: raise ValueError("Repayment must be greater than zero.")
     p_out,i_out=loan_outstanding(loan)
     if amount > p_out+i_out: raise ValueError("Repayment exceeds outstanding loan balance.")
-    for inst in loan.schedules:
+    for idx, inst in enumerate(loan.schedules, start=1):
         oi=money(inst.interest_due)-money(inst.interest_paid)
         op=money(inst.principal_due)-money(inst.principal_paid)
         x=min(remaining,oi)
         if x:
             inst.interest_paid=money(inst.interest_paid)+x
-            db.session.add(Transaction(reference=reference+"-I",member_id=loan.member_id,loan_id=loan.id,
+            db.session.add(Transaction(reference=f"{reference}-I-{idx:03d}",member_id=loan.member_id,loan_id=loan.id,
                 txn_type="Receipt",category="LOAN_INTEREST",amount=x,transaction_date=txn_date,
-                description="Loan interest received",created_by=actor))
+                description=f"Loan interest received; instalment {idx}",created_by=actor))
             remaining-=x
         x=min(remaining,op)
         if x:
             inst.principal_paid=money(inst.principal_paid)+x
-            db.session.add(Transaction(reference=reference+"-P",member_id=loan.member_id,loan_id=loan.id,
+            db.session.add(Transaction(reference=f"{reference}-P-{idx:03d}",member_id=loan.member_id,loan_id=loan.id,
                 txn_type="Receipt",category="LOAN_PRINCIPAL",amount=x,transaction_date=txn_date,
-                description="Loan principal repaid",created_by=actor))
+                description=f"Loan principal repaid; instalment {idx}",created_by=actor))
             remaining-=x
         if remaining<=0: break
     return amount
@@ -515,71 +515,220 @@ def create_app():
     @app.route("/loans/opening-template")
     @roles_required("Administrator","Chairman","Accountant")
     def loan_opening_template():
-        wb=Workbook(); ws=wb.active; ws.title="Outstanding Loans"
-        ws.append(["Loan No","Member No","Original Loan Date","Original Loan Amount","Flat Interest Rate %","Total Instalments","Instalments Paid as at 30-Oct-2026","Amount Paid as at 30-Oct-2026","First Instalment Due Date"])
-        ws.append(["OPEN-LN-001","REPLACE-WITH-MEMBER-NO","2026-05-15",500000,10,6,2,216666.66,"2026-06-15"])
+        wb=Workbook(); ws=wb.active; ws.title="Loan Register"
+        ws.append(["Loan No","Member No","Original Loan Date","Original Loan Amount","Flat Interest Rate %","Total Interest Charged (optional)","Total Instalments","Instalments Paid as at 30-Oct-2026","Total Amount Paid as at 30-Oct-2026","Interest Collected as at 30-Oct-2026","Principal Repaid as at 30-Oct-2026","First Instalment Due Date","Loan Status (Active/Closed)","M-Koba Reference (optional)"])
+        ws.append(["OPEN-LN-001","REPLACE-WITH-MEMBER-NO","2026-05-15",500000,10,50000,6,2,216666.66,50000,166666.66,"2026-06-15","Active","MK-EXAMPLE-001"])
+        ws.append(["OPEN-LN-002","REPLACE-WITH-MEMBER-NO","2026-01-10",300000,10,30000,6,6,330000,30000,300000,"2026-02-10","Closed","MK-EXAMPLE-002"])
         ws.append([])
-        ws.append(["IMPORTANT: enter one row per loan. Amount Paid is the cumulative amount actually received up to 30 October 2026. Instalments Paid means the number of complete instalments settled; any additional partial payment is included in Amount Paid."])
-        return excel_send(wb,"Visionaries_Outstanding_Loans_as_at_30_October_2026.xlsx")
+        ws.append(["IMPORTANT: Import ALL loans: active, partially paid and fully paid/closed. One row per loan. Total interest is calculated as original principal x flat rate % unless Total Interest Charged is entered. Enter actual interest collected and principal repaid separately; their sum must equal Total Amount Paid. If both split amounts are blank, the system allocates total paid interest-first. A Closed loan must have zero outstanding principal and interest. For transaction-level M-Koba matching, enter each actual receipt on the optional Repayment History sheet; when detailed rows are supplied for a loan, their totals must equal the loan register totals. If no detailed rows are supplied, the system records one cumulative receipt as at 30 October 2026."])
+        hist=wb.create_sheet("Repayment History")
+        hist.append(["Loan No","Repayment Date","M-Koba Receipt/Transaction ID","Total Amount","Interest Component (optional)","Principal Component (optional)"])
+        hist.append(["OPEN-LN-001","2026-07-15","MK-EXAMPLE-001A",108333.33,50000,58333.33])
+        hist.append(["OPEN-LN-001","2026-08-15","MK-EXAMPLE-001B",108333.33,0,108333.33])
+        hist.append(["OPEN-LN-002","2026-07-10","MK-EXAMPLE-002",330000,30000,300000])
+        hist.freeze_panes="A2"; hist.auto_filter.ref="A1:F4"
+        for col,width in {"A":20,"B":18,"C":34,"D":20,"E":22,"F":22}.items(): hist.column_dimensions[col].width=width
+        ws.freeze_panes="A2"; ws.auto_filter.ref="A1:N3"
+        for col,width in {"A":20,"B":22,"C":18,"D":22,"E":18,"F":28,"G":18,"H":25,"I":26,"J":28,"K":27,"L":22,"M":24,"N":28}.items(): ws.column_dimensions[col].width=width
+        return excel_send(wb,"Visionaries_All_Loans_as_at_30_October_2026.xlsx")
 
     @app.route("/loans/opening-upload",methods=["POST"])
     @roles_required("Administrator","Accountant")
     def loan_opening_upload():
         f=request.files.get("file")
         if not f:
-            flash("Select the Outstanding Loans Excel workbook.","danger"); return redirect(url_for("opening"))
+            flash("Select the historical loan register Excel workbook.","danger"); return redirect(url_for("opening"))
         try:
             wb=load_workbook(f,data_only=True)
-            if "Outstanding Loans" not in wb.sheetnames: raise ValueError("Workbook must contain the Outstanding Loans sheet. Download the supplied template.")
-            ws=wb["Outstanding Loans"]
+            sheet_name="Loan Register" if "Loan Register" in wb.sheetnames else ("Outstanding Loans" if "Outstanding Loans" in wb.sheetnames else None)
+            if not sheet_name: raise ValueError("Workbook must contain a Loan Register sheet. Download the latest all-loans template.")
+            ws=wb[sheet_name]
             headers=[str(c.value or "").strip() for c in ws[1]]; ix={h:i for i,h in enumerate(headers)}
-            required=["Loan No","Member No","Original Loan Date","Original Loan Amount","Flat Interest Rate %","Total Instalments","Instalments Paid as at 30-Oct-2026","Amount Paid as at 30-Oct-2026","First Instalment Due Date"]
+            # Accept the previous V1.3 header for backward compatibility.
+            if "Total Amount Paid as at 30-Oct-2026" not in ix and "Amount Paid as at 30-Oct-2026" in ix:
+                ix["Total Amount Paid as at 30-Oct-2026"] = ix["Amount Paid as at 30-Oct-2026"]
+            required=["Loan No","Member No","Original Loan Date","Original Loan Amount","Flat Interest Rate %","Total Instalments","Instalments Paid as at 30-Oct-2026","Total Amount Paid as at 30-Oct-2026","First Instalment Due Date"]
             missing=[h for h in required if h not in ix]
-            if missing: raise ValueError("Missing columns: "+", ".join(missing))
-            actor=current_user().id; count=0; seen=set()
-            def xdate(value, label):
-                if isinstance(value, datetime): return value.date()
-                if isinstance(value, date): return value
+            if missing: raise ValueError("Missing columns: "+", ".join(missing)+". Download the latest all-loans template.")
+            def xdate(value,label):
+                if isinstance(value,datetime): return value.date()
+                if isinstance(value,date): return value
                 try: return date.fromisoformat(str(value)[:10])
                 except Exception: raise ValueError(f"Invalid {label}: {value}")
-            for row in ws.iter_rows(min_row=2,values_only=True):
+            # Validate every row before adding any database objects. This prevents autoflush
+            # from flushing a partially built import while later rows are still being checked.
+            prepared=[]; seen=set(); actor=current_user().id
+            for rowno,row in enumerate(ws.iter_rows(min_row=2,values_only=True),start=2):
                 if not row or not row[ix["Loan No"]]: continue
                 no=str(row[ix["Loan No"]]).strip()
-                if no in seen or Loan.query.filter_by(loan_no=no).first(): raise ValueError(f"Duplicate loan number: {no}")
+                if no in seen or Loan.query.filter_by(loan_no=no).first(): raise ValueError(f"Row {rowno}: duplicate loan number: {no}")
+                if len(no)>40: raise ValueError(f"Row {rowno}: loan number must not exceed 40 characters.")
                 seen.add(no)
                 member_no=str(row[ix["Member No"]] or "").strip(); member=Member.query.filter_by(member_no=member_no).first()
-                if not member: raise ValueError(f"Unknown member number for loan {no}: {member_no}")
+                if not member: raise ValueError(f"Row {rowno}: unknown member number for loan {no}: {member_no}")
                 disb=xdate(row[ix["Original Loan Date"]],"original loan date")
                 first=xdate(row[ix["First Instalment Due Date"]],"first instalment due date")
                 if disb>LOAN_SNAPSHOT_DATE: raise ValueError(f"{no}: original loan date must be on or before 30 October 2026.")
-                if first<=disb: raise ValueError(f"{no}: first instalment due date must be after the original loan date.")
+                if first<=disb: raise ValueError(f"{no}: first instalment due date must be after original loan date.")
                 principal=money(row[ix["Original Loan Amount"]]); rate=money(row[ix["Flat Interest Rate %"]])
                 n=int(row[ix["Total Instalments"]] or 0); paid_n=int(row[ix["Instalments Paid as at 30-Oct-2026"]] or 0)
-                paid=money(row[ix["Amount Paid as at 30-Oct-2026"]])
-                if principal<=0 or rate<0 or n<1 or n>60 or paid_n<0 or paid_n>n: raise ValueError(f"{no}: invalid loan amount, rate or instalment count.")
-                interest=money(principal*rate/Decimal("100")); total=principal+interest
-                if paid<0 or paid>total: raise ValueError(f"{no}: amount paid must be between zero and total repayable ({fmt(total)}).")
-                if Transaction.query.filter_by(reference=no+"-OUT").first(): raise ValueError(f"Disbursement reference already exists for {no}.")
-                if paid>0 and Transaction.query.filter(Transaction.reference.in_([no+"-OPENPAY-I",no+"-OPENPAY-P"])).first(): raise ValueError(f"Opening repayment reference already exists for {no}.")
-                loan=Loan(loan_no=no,member_id=member.id,principal=principal,rate=rate,interest_total=interest,installments=n,first_due=first,disbursement_date=disb,created_by=actor)
+                total_paid=money(row[ix["Total Amount Paid as at 30-Oct-2026"]])
+                interest_col=ix.get("Total Interest Charged (optional)")
+                raw_interest=row[interest_col] if interest_col is not None and interest_col<len(row) else None
+                interest=money(raw_interest) if raw_interest not in (None,"") else money(principal*rate/Decimal("100"))
+                total=principal+interest
+                if interest<0: raise ValueError(f"{no}: total interest charged cannot be negative.")
+                if principal<=0 or rate<0 or n<1 or n>60 or paid_n<0 or paid_n>n: raise ValueError(f"{no}: invalid principal, rate or instalment count.")
+                if total_paid<0 or total_paid>total: raise ValueError(f"{no}: total paid must be between zero and total repayable ({fmt(total)}).")
+                i_col=ix.get("Interest Collected as at 30-Oct-2026"); p_col=ix.get("Principal Repaid as at 30-Oct-2026")
+                raw_i=row[i_col] if i_col is not None and i_col<len(row) else None
+                raw_p=row[p_col] if p_col is not None and p_col<len(row) else None
+                if raw_i not in (None,"") or raw_p not in (None,""):
+                    if raw_i in (None,"") or raw_p in (None,""): raise ValueError(f"{no}: enter both Interest Collected and Principal Repaid, or leave both blank.")
+                    interest_paid=money(raw_i); principal_paid=money(raw_p)
+                    if interest_paid<0 or interest_paid>interest or principal_paid<0 or principal_paid>principal: raise ValueError(f"{no}: interest/principal paid exceeds the amount charged/disbursed.")
+                    if interest_paid+principal_paid!=total_paid: raise ValueError(f"{no}: interest collected plus principal repaid must equal total amount paid.")
+                else:
+                    interest_paid=min(total_paid,interest); principal_paid=total_paid-interest_paid
+                # The instalment count is checked against the schedule for active loans.
+                # A fully settled loan may have been closed early, so its entered status
+                # overrides the scheduled-count comparison (but not the balance checks).
+                status_col=ix.get("Loan Status (Active/Closed)"); status=str(row[status_col] or "").strip().lower() if status_col is not None and status_col<len(row) else ""
+                if status not in ("","active","closed"): raise ValueError(f"{no}: loan status must be Active or Closed.")
+                base=(principal/Decimal(n)).quantize(CENT,rounding=ROUND_HALF_UP)
+                principal_schedule=[base for _ in range(n-1)]+[principal-base*(n-1)]
+                cumulative_due=[]; running=Decimal("0")
+                for idx_due,principal_due in enumerate(principal_schedule):
+                    running += principal_due + (interest if idx_due==0 else Decimal("0"))
+                    cumulative_due.append(running)
+                if status!="closed":
+                    if paid_n and total_paid+CENT < cumulative_due[paid_n-1]:
+                        raise ValueError(f"{no}: amount paid is below the total required for {paid_n} fully paid instalments ({fmt(cumulative_due[paid_n-1])}).")
+                    if paid_n<n and total_paid >= cumulative_due[paid_n]+CENT:
+                        raise ValueError(f"{no}: amount paid covers more instalments than the {paid_n} reported as paid. Correct the instalment count.")
+                if status=="closed" and (principal_paid!=principal or interest_paid!=interest): raise ValueError(f"{no}: a Closed loan must have all principal and interest paid.")
+                if principal_paid<principal and paid_n==n: raise ValueError(f"{no}: all instalments cannot be marked paid while principal remains outstanding.")
+                mp_col=ix.get("M-Koba Reference (optional)"); mp_ref=str(row[mp_col] or "").strip() if mp_col is not None and mp_col<len(row) else ""
+                token=hashlib.sha1(no.encode("utf-8")).hexdigest()[:10].upper()
+                refs=[f"OP-{token}-OUT",f"OP-{token}-I",f"OP-{token}-P"]
+                if Transaction.query.filter(Transaction.reference.in_(refs)).first(): raise ValueError(f"{no}: opening transaction reference already exists. Check whether this loan was previously imported.")
+                prepared.append(dict(no=no,member=member,disb=disb,first=first,principal=principal,rate=rate,n=n,paid_n=paid_n,
+                    interest=interest,total_paid=total_paid,interest_paid=interest_paid,principal_paid=principal_paid,split_supplied=(raw_i not in (None,"") or raw_p not in (None,"")),status=status,mp_ref=mp_ref,token=token))
+            if not prepared: raise ValueError("No loan rows were found in the worksheet.")
+            # Optional detailed repayment rows retain actual receipt dates and M-Koba references.
+            history_by_loan={}
+            if "Repayment History" in wb.sheetnames:
+                hs=wb["Repayment History"]
+                hh=[str(c.value or "").strip() for c in hs[1]]; hi={h:i for i,h in enumerate(hh)}
+                hrequired=["Loan No","Repayment Date","M-Koba Receipt/Transaction ID","Total Amount","Interest Component (optional)","Principal Component (optional)"]
+                hmissing=[h for h in hrequired if h not in hi]
+                if hmissing: raise ValueError("Repayment History sheet is missing columns: "+", ".join(hmissing))
+                loan_map={x["no"]:x for x in prepared}
+                for hrowno,hrow in enumerate(hs.iter_rows(min_row=2,values_only=True),start=2):
+                    if not hrow or not hrow[hi["Loan No"]]: continue
+                    hno=str(hrow[hi["Loan No"]]).strip()
+                    if hno not in loan_map: raise ValueError(f"Repayment History row {hrowno}: loan {hno} is not in the Loan Register sheet.")
+                    x=loan_map[hno]; hd=xdate(hrow[hi["Repayment Date"]],"repayment date")
+                    if hd<x["disb"] or hd>LOAN_SNAPSHOT_DATE: raise ValueError(f"{hno}: historical repayment date must be between the loan date and 30 October 2026.")
+                    htotal=money(hrow[hi["Total Amount"]])
+                    raw_hi=hrow[hi["Interest Component (optional)"]]; raw_hp=hrow[hi["Principal Component (optional)"]]
+                    if (raw_hi in (None,"") and raw_hp not in (None,"")) or (raw_hp in (None,"") and raw_hi not in (None,"")):
+                        raise ValueError(f"Repayment History row {hrowno}: enter both split components or leave both blank for automatic interest-first allocation.")
+                    hi_amt=money(raw_hi) if raw_hi not in (None,"") else None
+                    hp_amt=money(raw_hp) if raw_hp not in (None,"") else None
+                    if htotal<=0 or (hi_amt is not None and (hi_amt<0 or hp_amt<0 or hi_amt+hp_amt!=htotal)):
+                        raise ValueError(f"Repayment History row {hrowno}: total must equal interest plus principal and be greater than zero.")
+                    href=str(hrow[hi["M-Koba Receipt/Transaction ID"]] or "").strip()
+                    history_by_loan.setdefault(hno,[]).append(dict(date=hd,total=htotal,interest=hi_amt,principal=hp_amt,mp_ref=href,row=hrowno))
+                for x in prepared:
+                    hrows=sorted(history_by_loan.get(x["no"],[]),key=lambda r:(r["date"],r["row"]))
+                    if hrows:
+                        ht_sum=sum((r["total"] for r in hrows),Decimal("0"))
+                        if ht_sum!=x["total_paid"]: raise ValueError(f"{x['no']}: Repayment History total amount must equal Total Amount Paid in the Loan Register.")
+                        explicit=[r for r in hrows if r["interest"] is not None]
+                        blank=[r for r in hrows if r["interest"] is None]
+                        explicit_i=sum((r["interest"] for r in explicit),Decimal("0")); explicit_p=sum((r["principal"] for r in explicit),Decimal("0"))
+                        if not x["split_supplied"] and not blank:
+                            x["interest_paid"]=explicit_i; x["principal_paid"]=explicit_p
+                        remain_i=x["interest_paid"]-explicit_i; remain_p=x["principal_paid"]-explicit_p
+                        if remain_i<0 or remain_p<0: raise ValueError(f"{x['no']}: detailed receipt split exceeds the interest/principal totals in the Loan Register.")
+                        for pay in blank:
+                            pay_i=min(pay["total"],remain_i); pay_p=pay["total"]-pay_i
+                            if pay_p>remain_p: raise ValueError(f"{x['no']}: repayment history cannot be allocated to the register interest/principal totals. Enter the split amounts or correct the register.")
+                            pay["interest"]=pay_i; pay["principal"]=pay_p
+                            remain_i-=pay_i; remain_p-=pay_p
+                        if remain_i!=0 or remain_p!=0: raise ValueError(f"{x['no']}: Repayment History interest and principal totals must match the Loan Register split amounts.")
+            # Check every generated reference before any insert, including detailed receipts.
+            expected_refs=[]
+            for x in prepared:
+                expected_refs.append(f"OP-{x['token']}-OUT")
+                hrows=sorted(history_by_loan.get(x["no"],[]),key=lambda r:(r["date"],r["row"]))
+                if hrows:
+                    for payment_no,pay in enumerate(hrows,start=1):
+                        if pay["interest"]>0: expected_refs.append(f"OP-{x['token']}-R{payment_no:03d}-I")
+                        if pay["principal"]>0: expected_refs.append(f"OP-{x['token']}-R{payment_no:03d}-P")
+                else:
+                    if x["interest_paid"]>0: expected_refs.append(f"OP-{x['token']}-I")
+                    if x["principal_paid"]>0: expected_refs.append(f"OP-{x['token']}-P")
+            if len(expected_refs)!=len(set(expected_refs)): raise ValueError("The workbook generated duplicate internal transaction references. Check duplicate loan numbers and repayment rows.")
+            for offset in range(0,len(expected_refs),400):
+                chunk=expected_refs[offset:offset+400]
+                if Transaction.query.filter(Transaction.reference.in_(chunk)).first(): raise ValueError("One or more generated opening transaction references already exist. Check whether these loans were previously imported.")
+            # Post only after all rows have passed validation. A single commit makes the import atomic.
+            for x in prepared:
+                loan=Loan(loan_no=x["no"],member_id=x["member"].id,principal=x["principal"],rate=x["rate"],interest_total=x["interest"],
+                    installments=x["n"],first_due=x["first"],disbursement_date=x["disb"],created_by=actor)
                 db.session.add(loan); db.session.flush(); build_schedule(loan)
-                schedule=list(loan.schedules)
-                full_paid=sum((money(x.principal_due)+money(x.interest_due) for x in schedule[:paid_n]),Decimal("0"))
-                next_boundary=sum((money(x.principal_due)+money(x.interest_due) for x in schedule[:min(paid_n+1,n)]),Decimal("0"))
-                if paid+Decimal("0.01")<full_paid:
-                    raise ValueError(f"{no}: amount paid ({fmt(paid)}) is insufficient for {paid_n} fully paid instalments ({fmt(full_paid)} required).")
-                if paid_n<n and paid>=next_boundary+Decimal("0.01"):
-                    raise ValueError(f"{no}: amount paid is enough for more instalments than the {paid_n} reported as paid. Increase the paid-instalment count.")
-                db.session.add(Transaction(reference=no+"-OUT",member_id=member.id,loan_id=loan.id,txn_type="Disbursement",category="LOAN_DISBURSEMENT",amount=principal,transaction_date=disb,description="Opening loan register: original disbursement",created_by=actor))
-                if paid>0: apply_repayment(loan,paid,LOAN_SNAPSHOT_DATE,no+"-OPENPAY",actor)
+                db.session.add(Transaction(reference=f"OP-{x['token']}-OUT",member_id=x["member"].id,loan_id=loan.id,txn_type="Disbursement",
+                    category="LOAN_DISBURSEMENT",amount=x["principal"],transaction_date=x["disb"],description="Historical loan register: original disbursement",created_by=actor))
+                # Post detailed receipts on their actual dates when supplied. Otherwise
+                # post one cumulative snapshot receipt per component at 30 October 2026.
+                hrows=sorted(history_by_loan.get(x["no"],[]),key=lambda r:(r["date"],r["row"]))
+                if hrows:
+                    for payment_no,pay in enumerate(hrows,start=1):
+                        mp_note=f"; M-Koba receipt: {pay['mp_ref']}" if pay["mp_ref"] else ""
+                        if pay["interest"]>0:
+                            loan.schedules[0].interest_paid=money(loan.schedules[0].interest_paid)+pay["interest"]
+                            db.session.add(Transaction(reference=f"OP-{x['token']}-R{payment_no:03d}-I",member_id=x["member"].id,loan_id=loan.id,txn_type="Receipt",
+                                category="LOAN_INTEREST",amount=pay["interest"],transaction_date=pay["date"],
+                                description="Historical loan interest received"+mp_note,created_by=actor))
+                        remaining=pay["principal"]
+                        for inst in loan.schedules:
+                            capacity=money(inst.principal_due)-money(inst.principal_paid)
+                            part=min(remaining,capacity)
+                            if part>0:
+                                inst.principal_paid=money(inst.principal_paid)+part; remaining-=part
+                            if remaining<=0: break
+                        if pay["principal"]>0:
+                            db.session.add(Transaction(reference=f"OP-{x['token']}-R{payment_no:03d}-P",member_id=x["member"].id,loan_id=loan.id,txn_type="Receipt",
+                                category="LOAN_PRINCIPAL",amount=pay["principal"],transaction_date=pay["date"],
+                                description="Historical loan principal recovered"+mp_note,created_by=actor))
+                else:
+                    mp_note=f"; M-Koba reference: {x['mp_ref']}" if x["mp_ref"] else ""
+                    if x["interest_paid"]>0:
+                        inst=loan.schedules[0]; inst.interest_paid=x["interest_paid"]
+                        db.session.add(Transaction(reference=f"OP-{x['token']}-I",member_id=x["member"].id,loan_id=loan.id,txn_type="Receipt",
+                            category="LOAN_INTEREST",amount=x["interest_paid"],transaction_date=LOAN_SNAPSHOT_DATE,
+                            description="Historical interest collected up to 30 October 2026"+mp_note,created_by=actor))
+                    remaining=x["principal_paid"]
+                    for inst in loan.schedules:
+                        part=min(remaining,money(inst.principal_due))
+                        if part>0:
+                            inst.principal_paid=part; remaining-=part
+                        if remaining<=0: break
+                    if x["principal_paid"]>0:
+                        db.session.add(Transaction(reference=f"OP-{x['token']}-P",member_id=x["member"].id,loan_id=loan.id,txn_type="Receipt",
+                            category="LOAN_PRINCIPAL",amount=x["principal_paid"],transaction_date=LOAN_SNAPSHOT_DATE,
+                            description="Historical principal repaid up to 30 October 2026"+mp_note,created_by=actor))
                 p_out,i_out=loan_outstanding(loan)
                 loan.status="Closed" if p_out+i_out==0 else "Active"
-                count+=1
-            if count==0: raise ValueError("No loan rows were found in the worksheet.")
             db.session.commit()
-            flash(f"Outstanding loan register loaded as at 30 October 2026: {count} loans. Instalments, amounts paid and remaining schedules are now tracked individually.","success")
+            closed=sum(1 for x in prepared if x["principal_paid"]==x["principal"] and x["interest_paid"]==x["interest"])
+            interest_total=sum((x["interest_paid"] for x in prepared),Decimal("0"))
+            detailed_count=sum(len(history_by_loan.get(x["no"],[])) for x in prepared)
+            flash(f"Historical loan register imported: {len(prepared)} loans ({closed} fully paid/closed); interest collected recorded: TZS {fmt(interest_total)}. {detailed_count} dated repayment entries were matched to their M-Koba references. The upload was posted as one atomic batch.","success")
         except Exception as e:
-            db.session.rollback(); flash(f"Loan opening upload rejected; no loans were posted. {e}","danger")
+            db.session.rollback(); flash(f"Historical loan import rejected; no loans were posted. {e}","danger")
         return redirect(url_for("opening"))
 
     @app.route("/historical/template")
