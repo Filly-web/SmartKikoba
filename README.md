@@ -1,4 +1,4 @@
-# VISIONARIES SMART KIKOBA V1.1
+# VISIONARIES SMART KIKOBA V1.2
 
 Standalone first release built from scratch. Flask + SQLAlchemy + PostgreSQL, Render deployment, TZS currency.
 
@@ -10,14 +10,15 @@ Standalone first release built from scratch. Flask + SQLAlchemy + PostgreSQL, Re
 - Member registry and member-only financial views.
 - SHARE, SOCIAL and separately identified penalty receipts (penalties included in SOCIAL once).
 - Flat-rate loans, automatic schedule, interest-first repayment allocation, partial repayments.
-- Opening balances as at 1 September 2026, Excel template/upload, draft/Chairman approval lock.
-- Backdated transactions from 1 September 2026 with separate transaction and entry timestamps.
+- September opening balances with selectable opening date, Excel template/upload, draft/Chairman approval lock.
+- Historical backdated transactions from the day after the approved September opening date, with separate transaction and entry timestamps.
 - M-Pesa cash movement reconciliation, variance history, Chairman review without auto-balancing.
 - Cash expenses/withdrawals/other movements.
 - Historical date reporting and Excel export.
-- Transaction reversals with mandatory explanation and audit records.
+- Transaction reversals with mandatory explanations; original transactions remain marked as reversed.
 - Configurable contribution and penalty settings.
-- Audit trail, Render configuration, PostgreSQL support.
+- Historical Excel upload with Contributions, Loans and Repayments worksheets for dates from 1 October 2026 to the current date. All worksheets validate in one transaction; duplicates or invalid rows reject the whole upload.
+- Audit Trail module, page, route and active logging functionality removed. Existing database tables are left untouched to protect deployed data.
 
 ## Local setup
 1. Python 3.12 recommended.
@@ -60,3 +61,21 @@ For first-time deployment, the start command runs the idempotent `init-db` comma
 
 ## Database migrations
 Initialize migrations on the development copy with `flask --app wsgi.py db init`, then `flask --app wsgi.py db migrate -m "initial schema"` and `flask --app wsgi.py db upgrade`. Commit the generated `migrations/` directory to source control. On a brand-new database, `flask init-db` is the simplest bootstrap path.
+
+
+## Historical upload sequence
+1. Upload and approve the opening balance workbook with an opening date of 30 September 2026.
+2. Download the Historical Transactions template from the Historical Upload menu.
+3. Populate Contributions, Loans and Repayments. Use the same loan number on the Loans and Repayments sheets.
+4. Upload once. The entire workbook is rejected if any row is invalid or has a duplicate reference. Review reports after upload.
+
+The historical upload is designed for the 2026/27 catch-up period and accepts dates after the approved September opening date through the date of upload. Audit Trail screens and writes are disabled; the legacy database table is not dropped during deployment.
+
+
+## V1.2 historical data setup
+1. Upload members and confirm member numbers.
+2. Download the September opening balance template, enter balances as at 30 September 2026, upload and obtain Chairman approval.
+3. Download the Historical Transactions template and upload contributions, loan disbursements and repayments from 1 October 2026 onward. Keep each loan disbursement row before its repayment rows and use the same Loan Reference.
+4. Historical upload validates all rows and rolls back the complete batch if any row is invalid. Transaction references must be unique.
+
+The separate Audit Trail feature and its application routes/pages have been removed. Existing legacy database audit-log tables, if present from an earlier deployment, are left untouched and are no longer used. No production database or financial records are deleted.
