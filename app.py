@@ -18,7 +18,19 @@ LOAN_SNAPSHOT_DATE = date(2026, 10, 30)
 ROLES = ["Administrator", "Chairman", "Secretary", "Treasurer", "Accountant", "Member"]
 CENT = Decimal("0.01")
 def money(v):
-    return Decimal(str(v or 0)).quantize(CENT, rounding=ROUND_HALF_UP)
+    """Convert Excel/user-entered TZS values safely; blank, dash and comma formatting are supported."""
+    if v is None:
+        v = 0
+    if isinstance(v, str):
+        raw = v.strip()
+        if raw in ("", "-"):
+            v = 0
+        else:
+            raw = raw.replace(",", "").replace("TZS", "").replace("tzs", "").strip()
+            if raw.startswith("(") and raw.endswith(")"):
+                raw = "-" + raw[1:-1].strip()
+            v = raw
+    return Decimal(str(v)).quantize(CENT, rounding=ROUND_HALF_UP)
 def fmt(v):
     return f"{money(v):,.2f}"
 class User(db.Model):
@@ -531,7 +543,7 @@ def create_app():
         ws.append(["OPEN-LN-001","REPLACE-WITH-MEMBER-NO","2026-05-15",500000,10,50000,6,2,216666.66,50000,166666.66,"2026-06-15","Active","MK-EXAMPLE-001"])
         ws.append(["OPEN-LN-002","REPLACE-WITH-MEMBER-NO","2026-01-10",300000,10,30000,6,6,330000,30000,300000,"2026-02-10","Closed","MK-EXAMPLE-002"])
         ws.append([])
-        ws.append(["IMPORTANT: Import ALL loans: active, partially paid and fully paid/closed. One row per loan. Total interest is calculated as original principal x flat rate % unless Total Interest Charged is entered. Enter actual interest collected and principal repaid separately; their sum must equal Total Amount Paid. If both split amounts are blank, the system allocates total paid interest-first. A Closed loan must have zero outstanding principal and interest. For transaction-level M-Koba matching, enter each actual receipt on the optional Repayment History sheet; when detailed rows are supplied for a loan, their totals must equal the loan register totals. If no detailed rows are supplied, the system records one cumulative receipt as at 30 October 2026."])
+        ws.append(["IMPORTANT: Import ALL loans: active, partially paid and fully paid/closed. One row per loan. Total interest is calculated as original principal x flat rate % unless Total Interest Charged is entered. Enter actual interest collected and principal repaid separately; their sum should equal Total Amount Paid. If both split amounts are blank, the system allocates total paid interest-first. Repayment History is OPTIONAL. If supplied, it is matched to the cumulative Loan Register totals; differences become Administrator findings. If the history is incomplete or totals differ, after approval the system posts only the cumulative totals as at 30 October 2026 (not the detailed rows), preventing double counting. A Closed loan with a remaining balance is also an Administrator finding."])
         hist=wb.create_sheet("Repayment History")
         hist.append(["Loan No","Repayment Date","M-Koba Receipt/Transaction ID","Total Amount","Interest Component (optional)","Principal Component (optional)"])
         hist.append(["OPEN-LN-001","2026-07-15","MK-EXAMPLE-001A",108333.33,50000,58333.33])
@@ -637,6 +649,7 @@ def create_app():
             if not prepared: raise ValueError("No loan rows were found in the worksheet.")
             # Optional detailed repayment rows retain actual receipt dates and M-Koba references.
             history_by_loan={}
+            history_usable={}
             if "Repayment History" in wb.sheetnames:
                 hs=wb["Repayment History"]
                 hh=[str(c.value or "").strip() for c in hs[1]]; hi={h:i for i,h in enumerate(hh)}
@@ -660,24 +673,42 @@ def create_app():
                         raise ValueError(f"Repayment History row {hrowno}: total must equal interest plus principal and be greater than zero.")
                     href=str(hrow[hi["M-Koba Receipt/Transaction ID"]] or "").strip()
                     history_by_loan.setdefault(hno,[]).append(dict(date=hd,total=htotal,interest=hi_amt,principal=hp_amt,mp_ref=href,row=hrowno))
-                for x in prepared:
-                    hrows=sorted(history_by_loan.get(x["no"],[]),key=lambda r:(r["date"],r["row"]))
-                    if hrows:
-                        ht_sum=sum((r["total"] for r in hrows),Decimal("0"))
-                        if ht_sum!=x["total_paid"]: raise ValueError(f"{x['no']}: Repayment History total amount must equal Total Amount Paid in the Loan Register.")
-                        explicit=[r for r in hrows if r["interest"] is not None]
-                        blank=[r for r in hrows if r["interest"] is None]
-                        explicit_i=sum((r["interest"] for r in explicit),Decimal("0")); explicit_p=sum((r["principal"] for r in explicit),Decimal("0"))
-                        if not x["split_supplied"] and not blank:
-                            x["interest_paid"]=explicit_i; x["principal_paid"]=explicit_p
-                        remain_i=x["interest_paid"]-explicit_i; remain_p=x["principal_paid"]-explicit_p
-                        if remain_i<0 or remain_p<0: raise ValueError(f"{x['no']}: detailed receipt split exceeds the interest/principal totals in the Loan Register.")
-                        for pay in blank:
-                            pay_i=min(pay["total"],remain_i); pay_p=pay["total"]-pay_i
-                            if pay_p>remain_p: raise ValueError(f"{x['no']}: repayment history cannot be allocated to the register interest/principal totals. Enter the split amounts or correct the register.")
-                            pay["interest"]=pay_i; pay["principal"]=pay_p
-                            remain_i-=pay_i; remain_p-=pay_p
-                        if remain_i!=0 or remain_p!=0: raise ValueError(f"{x['no']}: Repayment History interest and principal totals must match the Loan Register split amounts.")
+            # Repayment History is optional. Any mismatch is a review finding; if approved,
+            # the importer posts the Loan Register cumulative split only, not the mismatched
+            # detail rows, so the same historical cash is never counted twice.
+            for x in prepared:
+                hrows=sorted(history_by_loan.get(x["no"],[]),key=lambda r:(r["date"],r["row"]))
+                history_usable[x["no"]]=False
+                if not hrows:
+                    continue
+                ht_sum=sum((r["total"] for r in hrows),Decimal("0"))
+                if ht_sum!=x["total_paid"]:
+                    soft_findings.append(f"{x['no']}: Repayment History totals TZS {fmt(ht_sum)} but Loan Register Total Amount Paid is TZS {fmt(x['total_paid'])}; difference TZS {fmt(abs(ht_sum-x['total_paid']))}. Administrator approval is required. If approved, only cumulative Loan Register totals will be posted at 30 October 2026; detailed rows will not be posted.")
+                    continue
+                explicit=[r for r in hrows if r["interest"] is not None]
+                blank=[r for r in hrows if r["interest"] is None]
+                explicit_i=sum((r["interest"] for r in explicit),Decimal("0")); explicit_p=sum((r["principal"] for r in explicit),Decimal("0"))
+                target_i=x["interest_paid"]; target_p=x["principal_paid"]
+                if not x["split_supplied"] and not blank:
+                    target_i=explicit_i; target_p=explicit_p
+                remain_i=target_i-explicit_i; remain_p=target_p-explicit_p
+                if remain_i<0 or remain_p<0:
+                    soft_findings.append(f"{x['no']}: detailed repayment interest/principal split exceeds the Loan Register cumulative split. Administrator approval is required. If approved, only cumulative Loan Register totals will be posted.")
+                    continue
+                allocation_error=False
+                for pay in blank:
+                    pay_i=min(pay["total"],remain_i); pay_p=pay["total"]-pay_i
+                    if pay_p>remain_p:
+                        allocation_error=True
+                        break
+                    pay["interest"]=pay_i; pay["principal"]=pay_p
+                    remain_i-=pay_i; remain_p-=pay_p
+                if allocation_error or remain_i!=0 or remain_p!=0:
+                    soft_findings.append(f"{x['no']}: Repayment History interest/principal split does not reconcile to the Loan Register. Administrator approval is required. If approved, only cumulative Loan Register totals will be posted.")
+                    continue
+                if not x["split_supplied"] and not blank:
+                    x["interest_paid"]=target_i; x["principal_paid"]=target_p
+                history_usable[x["no"]]=True
             # Soft inconsistencies are findings, not automatic rejections. Hold the entire
             # workbook until an Administrator reviews and approves these findings.
             if soft_findings and not approved_review:
@@ -692,7 +723,7 @@ def create_app():
             expected_refs=[]
             for x in prepared:
                 expected_refs.append(f"OP-{x['token']}-OUT")
-                hrows=sorted(history_by_loan.get(x["no"],[]),key=lambda r:(r["date"],r["row"]))
+                hrows=sorted(history_by_loan.get(x["no"],[]),key=lambda r:(r["date"],r["row"])) if history_usable.get(x["no"],False) else []
                 if hrows:
                     for payment_no,pay in enumerate(hrows,start=1):
                         if pay["interest"]>0: expected_refs.append(f"OP-{x['token']}-R{payment_no:03d}-I")
@@ -713,7 +744,7 @@ def create_app():
                     category="LOAN_DISBURSEMENT",amount=x["principal"],transaction_date=x["disb"],description="Historical loan register: original disbursement",created_by=actor))
                 # Post detailed receipts on their actual dates when supplied. Otherwise
                 # post one cumulative snapshot receipt per component at 30 October 2026.
-                hrows=sorted(history_by_loan.get(x["no"],[]),key=lambda r:(r["date"],r["row"]))
+                hrows=sorted(history_by_loan.get(x["no"],[]),key=lambda r:(r["date"],r["row"])) if history_usable.get(x["no"],False) else []
                 if hrows:
                     for payment_no,pay in enumerate(hrows,start=1):
                         mp_note=f"; M-Koba receipt: {pay['mp_ref']}" if pay["mp_ref"] else ""
@@ -757,8 +788,8 @@ def create_app():
             db.session.commit()
             closed=sum(1 for x in prepared if x["principal_paid"]==x["principal"] and x["interest_paid"]==x["interest"])
             interest_total=sum((x["interest_paid"] for x in prepared),Decimal("0"))
-            detailed_count=sum(len(history_by_loan.get(x["no"],[])) for x in prepared)
-            flash(f"Historical loan register imported: {len(prepared)} loans ({closed} fully paid/closed); interest collected recorded: TZS {fmt(interest_total)}. {detailed_count} dated repayment entries were matched to their M-Koba references. The upload was posted as one atomic batch.","success")
+            detailed_count=sum(len(history_by_loan.get(x["no"],[])) for x in prepared if history_usable.get(x["no"],False))
+            flash(f"Historical loan register imported: {len(prepared)} loans ({closed} fully paid/closed); interest collected recorded: TZS {fmt(interest_total)}. {detailed_count} dated repayment entries were matched to their M-Koba references. Where history was missing or did not reconcile, cumulative Loan Register totals were posted once at 30 October 2026. The upload was posted as one atomic batch.","success")
         except Exception as e:
             db.session.rollback(); flash(f"Historical loan import rejected; no loans were posted. {e}","danger")
         return redirect(url_for("opening"))

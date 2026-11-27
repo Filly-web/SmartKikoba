@@ -1,12 +1,13 @@
-# V1.5 deployment checklist
+# V1.7 deployment checklist
 
 - [ ] Back up the existing PostgreSQL database.
-- [ ] Deploy V1.5 to the existing Render service; keep the existing `DATABASE_URL`.
-- [ ] Ensure the Start Command runs `flask --app wsgi.py init-db && gunicorn wsgi:app` so the new loan-import-review table is created. `db.create_all()` creates the new table without deleting existing tables or records.
-- [ ] Sign in as Administrator and open **Administration → Loan Import Reviews**.
-- [ ] Upload the historical loan workbook. If findings are raised, no loans will be posted until Administrator approval.
-- [ ] Administrator reviews each finding and approves where appropriate.
-- [ ] Re-upload the exact same Excel workbook after approval. Do not edit and re-save it between approval and posting.
-- [ ] Verify the imported loan balances, partial instalment schedules, interest totals and M-Koba receipt references before using live records.
+- [ ] Replace application source with V1.7 in the existing GitHub repository.
+- [ ] Keep the existing Render service and `DATABASE_URL`; do not recreate the database.
+- [ ] Build command: `pip install -r requirements.txt`.
+- [ ] Start command: `flask --app wsgi.py init-db && gunicorn wsgi:app`.
+- [ ] Deploy and confirm the administrator can sign in.
+- [ ] Test the loan import first using a separate test database or test deployment.
+- [ ] If findings are raised, review them under Administration → Loan Import Reviews, approve only after checking the underlying M-Koba/loan records, then upload the exact same workbook bytes again.
+- [ ] Confirm summary-only historical repayments are recorded at 30 October 2026 and are not treated as individually date-matched M-Koba receipts.
 
-Structural errors such as unknown members, duplicate loan numbers, invalid dates, negative amounts and inconsistent payment splits remain rejected. Test against a separate database before production use.
+The ZIP does not automatically clear existing records. Do not use the Clear Group Data function unless a deliberate reset is required and a backup has been taken.

@@ -1,6 +1,16 @@
-# VISIONARIES SMART KIKOBA V1.5
+# VISIONARIES SMART KIKOBA V1.7
 
 Flask-based group savings and loan management portal. Currency: TZS. Production database: PostgreSQL on Render; local development defaults to SQLite.
+
+## V1.7 changes
+- Repayment History is optional; the Loan Register cumulative principal/interest paid figures can be imported without transaction-level receipt detail.
+- Repayment History totals or principal/interest split differences are recorded as Administrator review findings, not immediate upload errors. The full workbook is held until approval.
+- If history is absent or does not reconcile, the approved import posts only the cumulative Loan Register principal and interest totals once at 30 October 2026; it does not also post the non-reconciling detailed rows. This prevents duplicate cash/repayment recognition. Such summary postings are historical/unmatched for transaction-date M-Koba reconciliation.
+- If Repayment History reconciles exactly, its dated payments and M-Koba references are posted individually.
+- TZS input parsing accepts comma-separated amounts, optional TZS prefixes, blanks and a dash for zero. Invalid numeric cells produce a Decimal conversion error that is caught by the import's row-level exception handling (financial columns are validated before posting).
+
+## V1.6 changes
+- Administrator-set password/PIN field has no fixed 10-digit requirement; values remain securely hashed.
 
 ## V1.5 changes
 - Partial instalment payments are accepted. The amount paid is allocated to interest and principal, then applied across the earliest scheduled instalments; the unpaid portion remains outstanding and its deadline continues to be tracked.
@@ -32,7 +42,7 @@ Flask-based group savings and loan management portal. Currency: TZS. Production 
 2. Upload each outstanding loan with the loan register dated **30 October 2026**.
 3. Do **not** enter aggregate loan principal or loan interest in the member opening-balance worksheet. The separate loan register creates each loan and its remaining balance. This prevents double counting. Keep the `Loan Principal` and `Loan Interest` columns at zero in the opening-balance sheet.
 4. Enter each loan's total amount received up to 30 October 2026. Split it between `Interest Collected` and `Principal Repaid`; their sum must equal `Total Amount Paid`. The optional `Total Interest Charged` overrides the flat-rate calculation where the actual agreed interest differs. `Instalments Paid` is the count of fully settled instalments; fully settled loans must be marked `Closed` even if they were settled before the final scheduled date.
-5. For transaction-date M-Koba reconciliation, fill the optional `Repayment History` sheet with each actual receipt date, M-Koba transaction ID and amount. The rows for each loan must add up to the loan register's total paid amount. Interest/principal components may be left blank for automatic interest-first allocation, or entered as a pair. If detailed receipt history is unavailable for a loan, leave it out of that sheet; the system records its cumulative interest and principal totals on 30 October 2026. Those summary-only loans will not be matched by individual payment date.
+5. For transaction-date M-Koba reconciliation, optionally fill the `Repayment History` sheet with each actual receipt date, M-Koba transaction ID and amount. When the detailed rows reconcile to the Loan Register total and split, they are posted individually. If the sheet is absent or does not reconcile, the system creates an Administrator finding. After approval, it posts only the Loan Register cumulative interest and principal totals once on 30 October 2026; the detailed rows are not also posted. Summary-only loans are not matched by individual payment date and should be reconciled to M-Koba separately.
 6. After the opening position is approved, upload contributions, new loans and repayments dated 1 November 2026 onward using the Historical Transactions workbook. Use unique transaction references and the same loan number on loan and repayment rows.
 
 ## Local setup
