@@ -1,4 +1,4 @@
-# VISIONARIES SMART KIKOBA V1.7
+# VISIONARIES SMART KIKOBA V2.0
 
 Flask-based group savings and loan management portal. Currency: TZS. Production database: PostgreSQL on Render; local development defaults to SQLite.
 
@@ -98,3 +98,17 @@ This release changes the calculation and presentation of the M-Koba cash ledger 
 - All Jinja templates parsed successfully.
 - 17 targeted source-contract tests passed (loan import, partial-payment approval, optional repayment history and M-Koba cash-flow contracts).
 - Full pytest collection was not possible because Flask is not installed in the packaging environment; the Flask runtime and live PostgreSQL/Render integration have not been tested here.
+
+
+## V2.0 — M-Koba opening balance linked to opening contributions and historical loans
+- Removed the manually entered opening M-Koba wallet amount. The application now calculates the opening wallet position from the approved 31 October 2026 opening member balances and the historical loan register.
+- Opening cash starts with cumulative SHARE + SOCIAL contributions recorded in the approved opening balance batch.
+- Every imported historical loan disbursement dated on/before 31 October is treated as cash OUT. Historical principal repayments and interest collected dated on/before 31 October are treated as cash IN. This includes active, partly repaid and fully closed loans.
+- Formula: **Opening M-Koba cash = opening SHARE + SOCIAL + historical principal repayments + historical interest collected − historical loan disbursements.**
+- From 1 November 2026 onward, all new SHARE/SOCIAL/paid-penalty receipts, loan disbursements, principal/interest repayments and manual other receipts/payments flow into the same M-Koba cash ledger and dashboard balance.
+- The M-Koba ledger displays the opening contribution total and individual historical loan cash movements, then all subsequent movements. The dashboard, cash ledger and reconciliation use the same calculation.
+- Outstanding loan balances, unpaid penalties and loan instalment counts are not cash and are not directly added to or deducted from the wallet. The opening template's `Unpaid Penalty` column remains a receivable/obligation measure, not cash collected. Penalties actually collected are cash IN when recorded as `PENALTY` transactions.
+- Existing database tables are retained. The legacy `mpesa_opening` column is left in place for backward compatibility but is no longer used in the expected M-Koba calculation. No destructive migration or automatic data reset is required.
+
+## V2.0 validation notes
+Python syntax compilation, source-contract tests, workbook presence, template parsing where available, and ZIP integrity are checked. Full Flask/PostgreSQL/Render integration must still be tested against a separate test database before production use.

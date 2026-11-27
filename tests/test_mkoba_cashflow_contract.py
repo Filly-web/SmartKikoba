@@ -15,21 +15,22 @@ def test_dashboard_always_shows_expected_mkoba_balance():
 def test_wallet_formula_includes_all_operational_cash_categories():
     for category in ['"SHARE"', '"SOCIAL"', '"PENALTY"', '"LOAN_INTEREST"', '"LOAN_PRINCIPAL"']:
         assert category in APP
-    assert 'elif t.category=="LOAN_DISBURSEMENT"' in APP
-    assert 'opening+inflows-outflows' in APP
+    assert 'elif t.category == "LOAN_DISBURSEMENT"' in APP
+    assert 'opening + inflows - outflows' in APP
 
 def test_reversals_reverse_cash_direction():
-    assert 'Transaction.status.in_(["Posted","Reversal"])' in APP
-    assert 'if t.status=="Reversal"' in APP
-    assert 'direction="OUT" if direction=="IN" else "IN"' in APP
+    assert 'Transaction.status.in_(["Posted", "Reversal"])' in APP
+    assert 'if t.status == "Reversal"' in APP
+    assert 'direction = "OUT" if direction == "IN" else "IN"' in APP
 
-def test_snapshot_excludes_earlier_movements_to_prevent_double_counting():
-    assert 'Transaction.transaction_date>movement_start' in APP
-    assert 'CashMovement.movement_date>movement_start' in APP
+def test_snapshot_excludes_earlier_contribution_and_loan_history_from_later_cashflows():
+    assert 'Transaction.transaction_date > movement_start' in APP
+    assert 'CashMovement.movement_date > movement_start' in APP
+    assert 'def mkoba_opening_cash(snapshot):' in APP
 
-def test_opening_upload_captures_actual_mkoba_balance():
-    assert 'name="mkoba_opening"' in OPENING
-    assert 'mpesa_opening=money(request.form.get("mkoba_opening",0))' in APP
+def test_opening_upload_does_not_accept_a_separate_manual_wallet_balance():
+    assert 'name="mkoba_opening"' not in OPENING
+    assert 'mpesa_opening=Decimal("0")' in APP
 
 def test_reconciliation_and_cash_ledger_share_same_calculation():
     assert 'cashflow.inflows' in RECON

@@ -1,4 +1,4 @@
-# VISIONARIES SMART KIKOBA V1.9 deployment checklist
+# VISIONARIES SMART KIKOBA V2.0 deployment checklist
 
 1. Back up the existing PostgreSQL database before deployment.
 2. Replace the application source in the existing GitHub repository with the contents of this folder.
@@ -6,10 +6,11 @@
 4. Build command: `pip install -r requirements.txt`
 5. Start command: `flask --app wsgi.py init-db && gunicorn wsgi:app`
 6. Deploy and sign in using the existing administrator account.
-7. Check the approved 31 October 2026 M-Koba opening cash balance. This is the cash opening point; do not add the same pre-opening receipts/payments again as manual movements.
-8. Post shares, social contributions and penalties through Contributions; post loans through Loans; post loan repayments through the repayment workflow. These transactions appear automatically in the consolidated M-Koba cash ledger.
-9. Enter only other cash activity (expenses, withdrawals, other receipts/payments) in M-Koba Cash Inflows & Outflows. Do not re-enter contributions or loan movements there.
-10. Compare the expected M-Koba balance with the actual wallet statement under M-Koba Reconciliation.
-11. Test the release against a separate test database before relying on it for live financial reporting.
+7. Ensure the approved 31 October 2026 opening member balance batch contains cumulative SHARE and SOCIAL amounts.
+8. Import all historical loans (active, partly repaid and closed), including original disbursement amounts and cumulative principal/interest repayments or dated Repayment History. These historic loan movements feed the calculated opening M-Koba cash.
+9. The system calculates opening M-Koba cash as opening SHARE + SOCIAL + historic principal repayments + historic interest collected - historic loan disbursements. No manual wallet opening figure is required.
+10. From 1 November 2026 onward, post contributions, new loans and repayments through their respective modules. They automatically update M-Koba. Record only expenses, withdrawals and other cash movements through the M-Koba cash movement screen.
+11. Compare the expected M-Koba balance with the actual wallet statement under M-Koba Reconciliation.
+12. Test the release against a separate test database before relying on it for live financial reporting.
 
-The application does not automatically clear existing data during deployment.
+The application does not automatically clear existing data during deployment. The old `mpesa_opening` database field is retained for compatibility but is ignored by the new calculated balance.
