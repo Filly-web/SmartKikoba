@@ -1,8 +1,15 @@
-# VISIONARIES SMART KIKOBA V1.4
+# VISIONARIES SMART KIKOBA V1.5
 
 Flask-based group savings and loan management portal. Currency: TZS. Production database: PostgreSQL on Render; local development defaults to SQLite.
 
-## V1.4 changes
+## V1.5 changes
+- Partial instalment payments are accepted. The amount paid is allocated to interest and principal, then applied across the earliest scheduled instalments; the unpaid portion remains outstanding and its deadline continues to be tracked.
+- Instalment-count inconsistencies, partial instalments, repayments that appear to cover a different number of instalments, and loans marked Closed with a remaining balance are recorded as review findings rather than automatically rejecting the whole workbook.
+- If findings exist, the complete loan import is held and **no loans or transactions are posted**. The Administrator reviews the findings under **Administration → Loan Import Reviews** and approves or leaves them pending.
+- After approval, the exact same Excel workbook must be uploaded again to post the batch. The workbook is fingerprinted; editing it after approval requires a fresh review. Structural/data-integrity failures (unknown members, duplicate loan numbers, negative/over-limit amounts, invalid dates and inconsistent repayment splits) remain hard errors and cannot be approved around.
+- Each import remains atomic. The approval queue is stored in a new database table created by the existing `init-db` startup command; existing member and financial records are not deleted.
+
+## V1.5 changes
 - The historical loan import accepts **all loans** as at 30 October 2026, including fully paid/closed loans and active loans.
 - Captures principal repaid and interest collected separately. The optional `Repayment History` sheet captures each actual receipt date, M-Koba transaction/receipt ID and total amount. Interest/principal components can be entered or left blank for automatic interest-first allocation. These dated receipts feed the M-Pesa movement reconciliation on their actual dates. If detailed history is unavailable for a loan, the importer posts its cumulative split at 30 October 2026 and retains the optional M-Koba reference.
 - Fully repaid loans are retained with Closed status; interest collected is posted to the LOAN_INTEREST category and principal recovery to LOAN_PRINCIPAL.
@@ -47,4 +54,8 @@ Flask-based group savings and loan management portal. Currency: TZS. Production 
 The ZIP does not automatically wipe the live database. After deploying and signing in as Administrator, open **Administration → Clear group data**, review the list of records to be deleted, type the exact phrase `CLEAR ALL GROUP DATA`, tick the checkbox and submit. Take a PostgreSQL backup first. The reset is permanent. It retains administrator login(s) and group settings; all non-administrator accounts are deactivated.
 
 ## Validation status
-Python syntax compilation and ZIP integrity are checked during packaging. A live Flask/PostgreSQL test cannot be claimed unless run against a configured test database. Test this release against a separate test database before clearing or loading live group records.
+Python syntax compilation, source-contract checks and ZIP integrity are checked during packaging. A live Flask/PostgreSQL test cannot be claimed unless run against a configured test database. Test this release against a separate test database before clearing or loading live group records.
+
+### Administrator-set passwords / PINs (V1.6)
+
+The Users & Roles screen no longer imposes a 10-character/digit minimum on the initial password/PIN field. The administrator can set a non-empty password/PIN of the required length; the value is stored as a Werkzeug password hash, not in plain text. Users enter the same value on the login screen. Choose a strong, non-obvious PIN/password and do not reuse personal banking PINs.

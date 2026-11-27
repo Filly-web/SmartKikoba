@@ -1,19 +1,12 @@
-# V1.4 deployment checklist
+# V1.5 deployment checklist
 
-- [ ] Back up the existing Render PostgreSQL database.
-- [ ] Deploy V1.4 to the existing Render service and keep the existing `DATABASE_URL`.
-- [ ] Confirm administrator login still works.
-- [ ] Test the new opening and loan upload workflows using a test database first.
-- [ ] If intentionally starting with a clean group register, use Administration → Clear group data and confirm the irreversible reset. This retains administrator accounts and settings; other user accounts are deactivated.
-- [ ] Upload member records.
-- [ ] Download and complete the 31 October 2026 opening balance template. Keep Loan Principal and Loan Interest at zero.
-- [ ] Upload the member opening balances dated 31 October 2026 and obtain Chairman approval.
-- [ ] Download and complete the All Loans as at 30 October 2026 template. Include active, partially paid and fully paid/closed loans; confirm total paid equals interest collected plus principal repaid; include M-Koba receipt IDs and actual dates in the optional Repayment History sheet where available.
-- [ ] Upload the complete historical loan register. Check the loan schedules, remaining balances, overdue instalments and next due dates.
-- [ ] Upload transactions dated 1 November 2026 onward through the Historical Transactions workbook.
-- [ ] Reconcile the reports against the group records before live use.
+- [ ] Back up the existing PostgreSQL database.
+- [ ] Deploy V1.5 to the existing Render service; keep the existing `DATABASE_URL`.
+- [ ] Ensure the Start Command runs `flask --app wsgi.py init-db && gunicorn wsgi:app` so the new loan-import-review table is created. `db.create_all()` creates the new table without deleting existing tables or records.
+- [ ] Sign in as Administrator and open **Administration → Loan Import Reviews**.
+- [ ] Upload the historical loan workbook. If findings are raised, no loans will be posted until Administrator approval.
+- [ ] Administrator reviews each finding and approves where appropriate.
+- [ ] Re-upload the exact same Excel workbook after approval. Do not edit and re-save it between approval and posting.
+- [ ] Verify the imported loan balances, partial instalment schedules, interest totals and M-Koba receipt references before using live records.
 
-- [ ] Verify historical interest collected total against the group loan register and M-Koba statements.
-- [ ] If using Repayment History, confirm the dated receipt amounts match M-Koba and that the detailed total agrees with each loan register total.
-- [ ] Verify historical principal recovered total separately.
-- [ ] Confirm fully settled loans display Closed and do not appear as overdue.
+Structural errors such as unknown members, duplicate loan numbers, invalid dates, negative amounts and inconsistent payment splits remain rejected. Test against a separate database before production use.

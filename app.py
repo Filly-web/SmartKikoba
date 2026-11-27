@@ -90,6 +90,17 @@ class LoanInstallment(db.Model):
     interest_due = db.Column(db.Numeric(14,2), nullable=False)
     principal_paid = db.Column(db.Numeric(14,2), default=0)
     interest_paid = db.Column(db.Numeric(14,2), default=0)
+class LoanImportReview(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    workbook_hash = db.Column(db.String(64), nullable=False, index=True)
+    filename = db.Column(db.String(255), nullable=False)
+    findings = db.Column(db.Text, nullable=False)
+    status = db.Column(db.String(20), default="Pending", nullable=False)
+    prepared_by = db.Column(db.Integer, db.ForeignKey("user.id"))
+    reviewed_by = db.Column(db.Integer, db.ForeignKey("user.id"))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    reviewed_at = db.Column(db.DateTime)
+
 class OpeningBatch(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     batch_ref = db.Column(db.String(50), unique=True, nullable=False)
@@ -539,7 +550,11 @@ def create_app():
         if not f:
             flash("Select the historical loan register Excel workbook.","danger"); return redirect(url_for("opening"))
         try:
-            wb=load_workbook(f,data_only=True)
+            workbook_bytes=f.read()
+            workbook_hash=hashlib.sha256(workbook_bytes).hexdigest()
+            approved_review=LoanImportReview.query.filter_by(workbook_hash=workbook_hash,status="Approved").order_by(LoanImportReview.created_at.desc()).first()
+            soft_findings=[]
+            wb=load_workbook(io.BytesIO(workbook_bytes),data_only=True)
             sheet_name="Loan Register" if "Loan Register" in wb.sheetnames else ("Outstanding Loans" if "Outstanding Loans" in wb.sheetnames else None)
             if not sheet_name: raise ValueError("Workbook must contain a Loan Register sheet. Download the latest all-loans template.")
             ws=wb[sheet_name]
@@ -601,13 +616,18 @@ def create_app():
                 for idx_due,principal_due in enumerate(principal_schedule):
                     running += principal_due + (interest if idx_due==0 else Decimal("0"))
                     cumulative_due.append(running)
-                if status!="closed":
-                    if paid_n and total_paid+CENT < cumulative_due[paid_n-1]:
-                        raise ValueError(f"{no}: amount paid is below the total required for {paid_n} fully paid instalments ({fmt(cumulative_due[paid_n-1])}).")
-                    if paid_n<n and total_paid >= cumulative_due[paid_n]+CENT:
-                        raise ValueError(f"{no}: amount paid covers more instalments than the {paid_n} reported as paid. Correct the instalment count.")
-                if status=="closed" and (principal_paid!=principal or interest_paid!=interest): raise ValueError(f"{no}: a Closed loan must have all principal and interest paid.")
-                if principal_paid<principal and paid_n==n: raise ValueError(f"{no}: all instalments cannot be marked paid while principal remains outstanding.")
+                previous_due=cumulative_due[paid_n-1] if paid_n>0 else Decimal("0")
+                next_due=cumulative_due[paid_n] if paid_n<n else total
+                if paid_n and total_paid+CENT < previous_due:
+                    soft_findings.append(f"{no}: paid amount TZS {fmt(total_paid)} is below the scheduled total for {paid_n} fully-paid instalments (TZS {fmt(previous_due)}). This may indicate an incorrect instalment count.")
+                if paid_n<n and total_paid > previous_due and total_paid < next_due:
+                    soft_findings.append(f"{no}: partial instalment detected. TZS {fmt(total_paid-previous_due)} has been paid towards instalment {paid_n+1}, whose scheduled cumulative amount is TZS {fmt(next_due-previous_due)}. This is allowed but requires Administrator approval.")
+                if paid_n<n and total_paid >= next_due+CENT:
+                    soft_findings.append(f"{no}: paid amount TZS {fmt(total_paid)} appears to cover more than {paid_n} instalments. Review the number of fully paid instalments.")
+                if status=="closed" and (principal_paid!=principal or interest_paid!=interest):
+                    soft_findings.append(f"{no}: marked Closed but recorded repayments leave principal/interest outstanding (principal TZS {fmt(principal-principal_paid)}, interest TZS {fmt(interest-interest_paid)}).")
+                if principal_paid<principal and paid_n==n:
+                    soft_findings.append(f"{no}: all {n} instalments are marked fully paid while principal remains outstanding (TZS {fmt(principal-principal_paid)}).")
                 mp_col=ix.get("M-Koba Reference (optional)"); mp_ref=str(row[mp_col] or "").strip() if mp_col is not None and mp_col<len(row) else ""
                 token=hashlib.sha1(no.encode("utf-8")).hexdigest()[:10].upper()
                 refs=[f"OP-{token}-OUT",f"OP-{token}-I",f"OP-{token}-P"]
@@ -658,6 +678,16 @@ def create_app():
                             pay["interest"]=pay_i; pay["principal"]=pay_p
                             remain_i-=pay_i; remain_p-=pay_p
                         if remain_i!=0 or remain_p!=0: raise ValueError(f"{x['no']}: Repayment History interest and principal totals must match the Loan Register split amounts.")
+            # Soft inconsistencies are findings, not automatic rejections. Hold the entire
+            # workbook until an Administrator reviews and approves these findings.
+            if soft_findings and not approved_review:
+                existing=LoanImportReview.query.filter_by(workbook_hash=workbook_hash,status="Pending").first()
+                if not existing:
+                    review=LoanImportReview(workbook_hash=workbook_hash,filename=(f.filename or "historical-loans.xlsx")[:255],
+                        findings="\n".join(soft_findings),status="Pending",prepared_by=actor)
+                    db.session.add(review); db.session.commit()
+                flash(f"Loan import held for Administrator review. {len(soft_findings)} finding(s) were identified; no loans were posted. Open Administration → Loan Import Reviews.","warning")
+                return redirect(url_for("opening"))
             # Check every generated reference before any insert, including detailed receipts.
             expected_refs=[]
             for x in prepared:
@@ -722,6 +752,8 @@ def create_app():
                             description="Historical principal repaid up to 30 October 2026"+mp_note,created_by=actor))
                 p_out,i_out=loan_outstanding(loan)
                 loan.status="Closed" if p_out+i_out==0 else "Active"
+            if approved_review:
+                approved_review.status="Consumed"; approved_review.reviewed_at=datetime.utcnow()
             db.session.commit()
             closed=sum(1 for x in prepared if x["principal_paid"]==x["principal"] and x["interest_paid"]==x["interest"])
             interest_total=sum((x["interest_paid"] for x in prepared),Decimal("0"))
@@ -730,6 +762,24 @@ def create_app():
         except Exception as e:
             db.session.rollback(); flash(f"Historical loan import rejected; no loans were posted. {e}","danger")
         return redirect(url_for("opening"))
+
+    @app.route("/loans/opening-reviews")
+    @roles_required("Administrator")
+    def loan_opening_reviews():
+        reviews=LoanImportReview.query.order_by(LoanImportReview.created_at.desc()).all()
+        return render_template("loan_import_reviews.html",reviews=reviews)
+
+    @app.route("/loans/opening-reviews/<int:review_id>/approve",methods=["POST"])
+    @roles_required("Administrator")
+    def approve_loan_opening_review(review_id):
+        review=db.get_or_404(LoanImportReview,review_id)
+        if review.status!="Pending":
+            flash("Only pending loan import reviews can be approved.","warning")
+        else:
+            review.status="Approved"; review.reviewed_by=current_user().id; review.reviewed_at=datetime.utcnow()
+            db.session.commit()
+            flash("Exceptions approved. Now re-upload the exact same Excel workbook to post the loans. The workbook must not be edited after approval.","success")
+        return redirect(url_for("loan_opening_reviews"))
 
     @app.route("/historical/template")
     @roles_required("Administrator","Chairman","Accountant")
@@ -922,6 +972,7 @@ def create_app():
             try:
                 # Keep user accounts and group settings to avoid locking the group out.
                 # Clear all member and financial/operational records only.
+                LoanImportReview.query.delete(synchronize_session=False)
                 Transaction.query.delete(synchronize_session=False)
                 LoanInstallment.query.delete(synchronize_session=False)
                 Loan.query.delete(synchronize_session=False)
