@@ -7,7 +7,7 @@ from flask import Flask, render_template, request, redirect, url_for, flash, ses
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from werkzeug.security import generate_password_hash, check_password_hash
-from sqlalchemy import func, and_, inspect, text
+from sqlalchemy import func, and_
 from openpyxl import Workbook, load_workbook
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
@@ -1577,21 +1577,7 @@ def create_app():
 
     @app.cli.command("init-db")
     def init_db():
-        # Create newly introduced tables, then apply safe additive upgrades to
-        # tables that may already exist in an older Render PostgreSQL database.
         db.create_all()
-        inspector = inspect(db.engine)
-        if "in_app_notification" in inspector.get_table_names():
-            notification_columns = {c["name"] for c in inspector.get_columns("in_app_notification")}
-            if "recipient_user_id" not in notification_columns:
-                # Earlier deployments may have stored the recipient as user_id.
-                # Additive ALTER preserves all existing notification rows.
-                with db.engine.begin() as conn:
-                    conn.execute(text("ALTER TABLE in_app_notification ADD COLUMN recipient_user_id INTEGER"))
-                    if "user_id" in notification_columns:
-                        conn.execute(text("UPDATE in_app_notification SET recipient_user_id = user_id WHERE recipient_user_id IS NULL"))
-            with db.engine.begin() as conn:
-                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_in_app_notification_recipient_user_id ON in_app_notification (recipient_user_id)"))
         admin_username=os.getenv("BOOTSTRAP_ADMIN_USERNAME","admin").strip() or "admin"
         if not User.query.filter_by(username=admin_username).first():
             u=User(username=admin_username,full_name="System Administrator",role="Administrator")
