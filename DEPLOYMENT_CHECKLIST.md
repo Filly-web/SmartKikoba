@@ -1,47 +1,31 @@
-from pathlib import Path
+# VISIONARIES SMART KIKOBA V2.1 deployment checklist
 
-ROOT = Path(__file__).resolve().parents[1]
-APP = (ROOT / "app.py").read_text()
-DASH = (ROOT / "templates" / "dashboard.html").read_text()
-RECON = (ROOT / "templates" / "reconciliation.html").read_text()
-OPENING = (ROOT / "templates" / "opening.html").read_text()
-CASH = (ROOT / "templates" / "cash_movements.html").read_text()
+1. Back up the existing PostgreSQL database before deployment.
+2. Replace the application source in the existing GitHub repository with the contents of this folder.
+3. Keep the existing Render service, PostgreSQL database and `DATABASE_URL`. Do not delete or recreate the production database.
+4. Build command: `pip install -r requirements.txt`
+5. Start command: `flask --app wsgi.py init-db && gunicorn wsgi:app`
+6. Deploy and sign in using the existing administrator account.
+7. Ensure the approved 31 October 2026 opening member balance batch contains cumulative SHARE and SOCIAL amounts.
+8. Import all historical loans (active, partly repaid and closed), including original disbursement amounts and cumulative principal/interest repayments or dated Repayment History. These historic loan movements feed the calculated opening M-Koba cash.
+9. The system calculates opening M-Koba cash as opening SHARE + SOCIAL + historic principal repayments + historic interest collected - historic loan disbursements. No manual wallet opening figure is required.
+10. From 1 November 2026 onward, post contributions, new loans and repayments through their respective modules. They automatically update M-Koba. Record only expenses, withdrawals and other cash movements through the M-Koba cash movement screen.
+11. Compare the expected M-Koba balance with the actual wallet statement under M-Koba Reconciliation.
+12. Test the release against a separate test database before relying on it for live financial reporting.
 
-def test_dashboard_always_shows_expected_mkoba_balance():
-    assert 'EXPECTED M-KOBA BALANCE' in DASH
-    assert 'cashflow=mkoba_cashflow(d)' in APP
-    assert 'cash=cashflow["closing"]' in APP
+The application does not automatically clear existing data during deployment. The old `mpesa_opening` database field is retained for compatibility but is ignored by the new calculated balance.
 
-def test_wallet_formula_includes_all_operational_cash_categories():
-    for category in ['"SHARE"', '"SOCIAL"', '"PENALTY"', '"LOAN_INTEREST"', '"LOAN_PRINCIPAL"']:
-        assert category in APP
-    assert 'elif t.category == "LOAN_DISBURSEMENT"' in APP
-    assert 'opening + inflows - outflows' in APP
 
-def test_reversals_reverse_cash_direction():
-    assert 'Transaction.status.in_(["Posted", "Reversal"])' in APP
-    assert 'if t.status == "Reversal"' in APP
-    assert 'direction = "OUT" if direction == "IN" else "IN"' in APP
+V2.1 dashboard linkage correction: dashboard SHARE, SOCIAL and loan balances now use the latest approved opening batch applicable to the report date and add only transactions posted after that snapshot. This prevents later approved batches from being summed together and prevents pre-opening transactions from being double-counted. November SHARE/SOCIAL receipts and loan principal/interest repayments feed dashboard balances and the M-Koba cashflow automatically.
 
-def test_snapshot_excludes_earlier_contribution_and_loan_history_from_later_cashflows():
-    assert 'Transaction.transaction_date > movement_start' in APP
-    assert 'CashMovement.movement_date > movement_start' in APP
-    assert 'def mkoba_opening_cash(snapshot):' in APP
 
-def test_opening_upload_does_not_accept_a_separate_manual_wallet_balance():
-    assert 'name="mkoba_opening"' not in OPENING
-    assert 'mpesa_opening=Decimal("0")' in APP
+## V3.0 upgrade steps (existing Render service)
 
-def test_reconciliation_and_cash_ledger_share_same_calculation():
-    assert 'cashflow.inflows' in RECON
-    assert 'cashflow.outflows' in RECON
-    assert 'ledger=mkoba_cash_ledger(as_at)' in APP
-    assert 'Consolidated M-Koba cash ledger' in CASH
+1. Take a verified backup of the existing PostgreSQL database.
+2. Replace the deployed source with the V3.0 ZIP contents. Keep the existing Render service and `DATABASE_URL`.
+3. From the Render Shell, run `flask --app wsgi:app init-db` once to create the new loan application table. This calls `create_all()` and does not erase existing records.
+4. Confirm a member login can submit an application using Airtel/Tigo/Halotel; confirm a leader can approve it and see the resulting loan in Loan Tracking.
+5. Test manual loan entry, contribution posting, reversal, monthly contribution export and full-history export.
+6. Do not use the operational data reset page as part of this upgrade.
 
-def test_manual_cash_movements_cannot_duplicate_automatic_transaction_types():
-    assert 'Other receipt' in APP and 'Other payment' in APP
-    assert 'Do not re-enter shares, social, penalties, loan disbursements or loan repayments here.' in CASH
-    assert 'allowed[category]!=direction' in APP
-
-def test_manual_movements_before_or_on_opening_snapshot_are_rejected():
-    assert 'movement_date<=snapshot.opening_date' in APP
+V3.0 user deletion preserves financial records and clears only references to the deleted user account.
