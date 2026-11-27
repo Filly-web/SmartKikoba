@@ -1,0 +1,19 @@
+[
+  "tests/test_loan_import_contract.py::test_all_loans_template_contains_closed_and_mkoba_history_sheets",
+  "tests/test_loan_import_contract.py::test_duplicate_repayment_reference_generation_is_installment_specific",
+  "tests/test_loan_import_contract.py::test_sample_loan_register_totals_match_repayment_history",
+  "tests/test_mkoba_cashflow_contract.py::test_dashboard_always_shows_expected_mkoba_balance",
+  "tests/test_mkoba_cashflow_contract.py::test_manual_cash_movements_cannot_duplicate_automatic_transaction_types",
+  "tests/test_mkoba_cashflow_contract.py::test_manual_movements_before_or_on_opening_snapshot_are_rejected",
+  "tests/test_mkoba_cashflow_contract.py::test_opening_upload_captures_actual_mkoba_balance",
+  "tests/test_mkoba_cashflow_contract.py::test_reconciliation_and_cash_ledger_share_same_calculation",
+  "tests/test_mkoba_cashflow_contract.py::test_reversals_reverse_cash_direction",
+  "tests/test_mkoba_cashflow_contract.py::test_snapshot_excludes_earlier_movements_to_prevent_double_counting",
+  "tests/test_mkoba_cashflow_contract.py::test_wallet_formula_includes_all_operational_cash_categories",
+  "tests/test_partial_payment_review_contract.py::test_approved_workbook_must_match_exact_upload_bytes",
+  "tests/test_partial_payment_review_contract.py::test_import_is_held_until_administrator_approval",
+  "tests/test_partial_payment_review_contract.py::test_partial_installments_are_findings_not_hard_rejections",
+  "tests/test_v17_optional_history_contract.py::test_money_parser_accepts_commas_tzs_and_dash",
+  "tests/test_v17_optional_history_contract.py::test_optional_history_falls_back_to_cumulative_snapshot_once",
+  "tests/test_v17_optional_history_contract.py::test_repayment_history_mismatch_is_a_finding_not_hard_rejection"
+]
