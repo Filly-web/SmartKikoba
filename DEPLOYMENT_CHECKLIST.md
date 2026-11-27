@@ -1,4 +1,4 @@
-# VISIONARIES SMART KIKOBA V2.0 deployment checklist
+# VISIONARIES SMART KIKOBA V2.1 deployment checklist
 
 1. Back up the existing PostgreSQL database before deployment.
 2. Replace the application source in the existing GitHub repository with the contents of this folder.
@@ -14,3 +14,6 @@
 12. Test the release against a separate test database before relying on it for live financial reporting.
 
 The application does not automatically clear existing data during deployment. The old `mpesa_opening` database field is retained for compatibility but is ignored by the new calculated balance.
+
+
+V2.1 dashboard linkage correction: dashboard SHARE, SOCIAL and loan balances now use the latest approved opening batch applicable to the report date and add only transactions posted after that snapshot. This prevents later approved batches from being summed together and prevents pre-opening transactions from being double-counted. November SHARE/SOCIAL receipts and loan principal/interest repayments feed dashboard balances and the M-Koba cashflow automatically.

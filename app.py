@@ -184,15 +184,27 @@ def txn_query(as_at=None, member_id=None):
     if as_at: q=q.filter(Transaction.transaction_date <= as_at)
     if member_id: q=q.filter_by(member_id=member_id)
     return q
-def opening_position(member_id=None):
-    q=OpeningBalance.query.join(OpeningBatch).filter(OpeningBatch.status=="Approved")
+def opening_position(member_id=None, snapshot=None):
+    """Return balances from one applicable approved opening batch, never sum snapshots."""
+    if not snapshot:
+        return {k: Decimal("0") for k in ["share", "social", "penalty", "loan_principal", "loan_interest", "adjustment"]}
+    q=OpeningBalance.query.filter_by(batch_id=snapshot.id)
     if member_id: q=q.filter(OpeningBalance.member_id==member_id)
     rows=q.all()
     return {k:sum((money(getattr(x,k)) for x in rows), Decimal("0")) for k in ["share","social","penalty","loan_principal","loan_interest","adjustment"]}
 def totals(as_at=None, member_id=None):
-    op=opening_position(member_id)
+    """Opening position plus transactions posted after that snapshot through as_at."""
+    report_date = as_at or date.today()
+    snapshot = mkoba_snapshot(report_date)
+    op=opening_position(member_id, snapshot)
     data={k:op.get(k,Decimal("0")) for k in op}
-    for t in txn_query(as_at,member_id).all():
+    q = txn_query(report_date, member_id)
+    # Opening balances already include all member balances through the snapshot date.
+    # Only later transactions should move dashboard balances; otherwise history is
+    # counted twice and the snapshot can mask the November activity.
+    if snapshot:
+        q = q.filter(Transaction.transaction_date > snapshot.opening_date)
+    for t in q.all():
         if t.category=="SHARE": data["share"] += money(t.amount)
         elif t.category=="SOCIAL": data["social"] += money(t.amount)
         elif t.category=="PENALTY": data["social"] += money(t.amount); data["penalty"] += money(t.amount)
