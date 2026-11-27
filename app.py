@@ -1350,6 +1350,8 @@ def create_app():
             try:
                 # Keep user accounts and group settings to avoid locking the group out.
                 # Clear all member and financial/operational records only.
+                # Remove applications first because approved applications may reference loans.
+                LoanApplication.query.delete(synchronize_session=False)
                 LoanImportReview.query.delete(synchronize_session=False)
                 Transaction.query.delete(synchronize_session=False)
                 LoanInstallment.query.delete(synchronize_session=False)
@@ -1364,7 +1366,7 @@ def create_app():
                 Member.query.delete(synchronize_session=False)
                 db.session.commit()
                 session.clear()
-                flash("All member and operational financial data has been cleared. Administrator account(s) and group settings were retained; non-administrator accounts were deactivated.","success")
+                flash("All member profiles, loan applications and operational financial records have been cleared. Administrator account(s) and group settings were retained; non-administrator accounts were deactivated.","success")
                 return redirect(url_for("login"))
             except Exception as e:
                 db.session.rollback(); flash(f"Reset failed; database transaction was rolled back. {e}","danger")
