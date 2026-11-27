@@ -1,5 +1,6 @@
 import os, secrets, csv, io
 from datetime import datetime, date, timedelta
+from calendar import monthrange
 from decimal import Decimal, ROUND_HALF_UP
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, flash, session, send_file, abort
@@ -12,7 +13,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 db = SQLAlchemy()
 migrate = Migrate()
-CUT_OFF = date(2026, 9, 30)
+CUT_OFF = date(2026, 10, 31)
+LOAN_SNAPSHOT_DATE = date(2026, 10, 30)
 ROLES = ["Administrator", "Chairman", "Secretary", "Treasurer", "Accountant", "Member"]
 CENT = Decimal("0.01")
 def money(v):
@@ -171,7 +173,10 @@ def totals(as_at=None, member_id=None):
         if t.category=="SHARE": data["share"] += money(t.amount)
         elif t.category=="SOCIAL": data["social"] += money(t.amount)
         elif t.category=="PENALTY": data["social"] += money(t.amount); data["penalty"] += money(t.amount)
-        elif t.category=="LOAN_DISBURSEMENT": data["loan_principal"] += money(t.amount)
+        elif t.category=="LOAN_DISBURSEMENT":
+            data["loan_principal"] += money(t.amount)
+            linked_loan=db.session.get(Loan,t.loan_id) if t.loan_id else None
+            if linked_loan: data["loan_interest"] += money(linked_loan.interest_total)
         elif t.category=="LOAN_PRINCIPAL": data["loan_principal"] -= money(t.amount)
         elif t.category=="LOAN_INTEREST": data["loan_interest"] -= money(t.amount)
     return data
@@ -180,6 +185,11 @@ def loan_outstanding(loan):
     for inst in loan.schedules:
         p -= money(inst.principal_paid); i -= money(inst.interest_paid)
     return max(p,Decimal("0")), max(i,Decimal("0"))
+def add_months(d, months):
+    month_index=d.month-1+months
+    year=d.year+month_index//12
+    month=month_index%12+1
+    return date(year,month,min(d.day,monthrange(year,month)[1]))
 def build_schedule(loan):
     principal=money(loan.principal)
     interest=money(loan.interest_total)
@@ -188,7 +198,7 @@ def build_schedule(loan):
     for n in range(1,loan.installments+1):
         pr=base if n<loan.installments else principal-allocated
         allocated += pr
-        due=loan.first_due + timedelta(days=30*(n-1))
+        due=add_months(loan.first_due,n-1)
         db.session.add(LoanInstallment(loan_id=loan.id, installment_no=n, due_date=due,
             principal_due=pr, interest_due=interest if n==1 else 0))
 def apply_repayment(loan, amount, txn_date, reference, actor):
@@ -378,7 +388,7 @@ def create_app():
         if request.method=="POST" and current_user().role=="Member": abort(403)
         if request.method=="POST":
             d=date.fromisoformat(request.form["disbursement_date"]); first=date.fromisoformat(request.form["first_due"])
-            if d<date(2026,10,1): flash("Use the historical Excel upload for dates before October 2026.","danger"); return redirect(url_for("loans"))
+            if d<date(2026,11,1): flash("For opening loans dated on or before 30 October 2026, use the Outstanding Loans upload. New loans can be posted from 1 November 2026 onward.","danger"); return redirect(url_for("loans"))
             p=money(request.form["principal"]); rate=money(request.form["rate"]); n=int(request.form["installments"])
             if p<=0 or n<1 or n>60 or rate<0: flash("Check principal, rate and installment count.","danger"); return redirect(url_for("loans"))
             interest=money(p*rate/Decimal("100"))
@@ -426,10 +436,12 @@ def create_app():
         loan=db.get_or_404(Loan,loan_id)
         try:
             d=date.fromisoformat(request.form["transaction_date"])
-            if d<date(2026,10,1): raise ValueError("Use the historical Excel upload for repayments dated before October 2026.")
+            if d<date(2026,11,1): raise ValueError("For repayments dated on or before 30 October 2026, include the cumulative amount in the Outstanding Loans opening upload. New repayments can be posted from 1 November 2026 onward.")
             ref="REP-"+secrets.token_hex(6).upper()
             apply_repayment(loan,request.form["amount"],d,ref,current_user().id)
-            db.session.commit(); flash("Repayment allocated to earliest outstanding installment: interest first, then principal.","success")
+            p_out,i_out=loan_outstanding(loan)
+            loan.status="Closed" if p_out+i_out==0 else "Active"
+            db.session.commit(); flash("Repayment allocated to earliest outstanding instalment: interest first, then principal.","success")
         except Exception as e:
             db.session.rollback(); flash(str(e),"danger")
         return redirect(url_for("loans"))
@@ -439,10 +451,17 @@ def create_app():
         if request.method=="POST":
             action=request.form.get("action")
             if action=="manual":
-                batch=OpeningBatch(batch_ref="OPEN-"+secrets.token_hex(5).upper(),opening_date=date.fromisoformat(request.form.get("opening_date") or "2026-09-30"),mpesa_opening=money(request.form.get("mpesa_opening",0)),prepared_by=current_user().id)
+                opening_date=date.fromisoformat(request.form.get("opening_date") or "2026-10-31")
+                if opening_date != date(2026,10,31):
+                    flash("This version uses 31 October 2026 as the opening balance date.","danger")
+                    return redirect(url_for("opening"))
+                batch=OpeningBatch(batch_ref="OPEN-"+secrets.token_hex(5).upper(),opening_date=opening_date,mpesa_opening=money(request.form.get("mpesa_opening",0)),prepared_by=current_user().id)
                 db.session.add(batch); db.session.flush()
                 for m in Member.query.filter_by(active=True).all():
                     vals={k:money(request.form.get(f"{k}_{m.id}",0)) for k in ["share","social","penalty","loan_principal","loan_interest","adjustment"]}
+                    if vals["loan_principal"] or vals["loan_interest"]:
+                        flash("Do not enter aggregate loan balances in the 31 October opening sheet. Upload each loan separately so its instalments can be tracked individually.","danger")
+                        db.session.rollback(); return redirect(url_for("opening"))
                     if any(vals.values()):
                         db.session.add(OpeningBalance(batch_id=batch.id,member_id=m.id,**vals,adjustment_description=request.form.get(f"desc_{m.id}")))
                 db.session.commit(); flash("Opening balance batch saved as Draft. Chairman approval is required.","success")
@@ -473,7 +492,9 @@ def create_app():
             idx={h:i for i,h in enumerate(heads)}
             required=["Member No","SHARE","SOCIAL","Unpaid Penalty","Loan Principal","Loan Interest","Other Adjustment"]
             if any(x not in idx for x in required): raise ValueError("Template columns do not match.")
-            batch=OpeningBatch(batch_ref="OPEN-"+secrets.token_hex(5).upper(),opening_date=date.fromisoformat(request.form.get("opening_date") or "2026-09-30"),prepared_by=current_user().id)
+            opening_date=date.fromisoformat(request.form.get("opening_date") or "2026-10-31")
+            if opening_date != date(2026,10,31): raise ValueError("This release is configured for the opening balance date 31 October 2026.")
+            batch=OpeningBatch(batch_ref="OPEN-"+secrets.token_hex(5).upper(),opening_date=opening_date,prepared_by=current_user().id)
             db.session.add(batch); db.session.flush()
             for row in ws.iter_rows(min_row=2,values_only=True):
                 if not row[idx["Member No"]]: continue
@@ -482,6 +503,8 @@ def create_app():
                 vals={"share":money(row[idx["SHARE"]]),"social":money(row[idx["SOCIAL"]]),"penalty":money(row[idx["Unpaid Penalty"]]),
                     "loan_principal":money(row[idx["Loan Principal"]]),"loan_interest":money(row[idx["Loan Interest"]]),
                     "adjustment":money(row[idx["Other Adjustment"]])}
+                if vals["loan_principal"] or vals["loan_interest"]:
+                    raise ValueError("Set Loan Principal and Loan Interest to zero here. Upload each loan separately using Outstanding Loans as at 30 October 2026.")
                 db.session.add(OpeningBalance(batch_id=batch.id,member_id=m.id,**vals,
                     adjustment_description=str(row[idx["Adjustment Description"]] or "") if "Adjustment Description" in idx else ""))
             db.session.commit()
@@ -489,18 +512,88 @@ def create_app():
         except Exception as e:
             db.session.rollback(); flash(f"Upload rejected: {e}","danger")
         return redirect(url_for("opening"))
+    @app.route("/loans/opening-template")
+    @roles_required("Administrator","Chairman","Accountant")
+    def loan_opening_template():
+        wb=Workbook(); ws=wb.active; ws.title="Outstanding Loans"
+        ws.append(["Loan No","Member No","Original Loan Date","Original Loan Amount","Flat Interest Rate %","Total Instalments","Instalments Paid as at 30-Oct-2026","Amount Paid as at 30-Oct-2026","First Instalment Due Date"])
+        ws.append(["OPEN-LN-001","REPLACE-WITH-MEMBER-NO","2026-05-15",500000,10,6,2,216666.66,"2026-06-15"])
+        ws.append([])
+        ws.append(["IMPORTANT: enter one row per loan. Amount Paid is the cumulative amount actually received up to 30 October 2026. Instalments Paid means the number of complete instalments settled; any additional partial payment is included in Amount Paid."])
+        return excel_send(wb,"Visionaries_Outstanding_Loans_as_at_30_October_2026.xlsx")
+
+    @app.route("/loans/opening-upload",methods=["POST"])
+    @roles_required("Administrator","Accountant")
+    def loan_opening_upload():
+        f=request.files.get("file")
+        if not f:
+            flash("Select the Outstanding Loans Excel workbook.","danger"); return redirect(url_for("opening"))
+        try:
+            wb=load_workbook(f,data_only=True)
+            if "Outstanding Loans" not in wb.sheetnames: raise ValueError("Workbook must contain the Outstanding Loans sheet. Download the supplied template.")
+            ws=wb["Outstanding Loans"]
+            headers=[str(c.value or "").strip() for c in ws[1]]; ix={h:i for i,h in enumerate(headers)}
+            required=["Loan No","Member No","Original Loan Date","Original Loan Amount","Flat Interest Rate %","Total Instalments","Instalments Paid as at 30-Oct-2026","Amount Paid as at 30-Oct-2026","First Instalment Due Date"]
+            missing=[h for h in required if h not in ix]
+            if missing: raise ValueError("Missing columns: "+", ".join(missing))
+            actor=current_user().id; count=0; seen=set()
+            def xdate(value, label):
+                if isinstance(value, datetime): return value.date()
+                if isinstance(value, date): return value
+                try: return date.fromisoformat(str(value)[:10])
+                except Exception: raise ValueError(f"Invalid {label}: {value}")
+            for row in ws.iter_rows(min_row=2,values_only=True):
+                if not row or not row[ix["Loan No"]]: continue
+                no=str(row[ix["Loan No"]]).strip()
+                if no in seen or Loan.query.filter_by(loan_no=no).first(): raise ValueError(f"Duplicate loan number: {no}")
+                seen.add(no)
+                member_no=str(row[ix["Member No"]] or "").strip(); member=Member.query.filter_by(member_no=member_no).first()
+                if not member: raise ValueError(f"Unknown member number for loan {no}: {member_no}")
+                disb=xdate(row[ix["Original Loan Date"]],"original loan date")
+                first=xdate(row[ix["First Instalment Due Date"]],"first instalment due date")
+                if disb>LOAN_SNAPSHOT_DATE: raise ValueError(f"{no}: original loan date must be on or before 30 October 2026.")
+                if first<=disb: raise ValueError(f"{no}: first instalment due date must be after the original loan date.")
+                principal=money(row[ix["Original Loan Amount"]]); rate=money(row[ix["Flat Interest Rate %"]])
+                n=int(row[ix["Total Instalments"]] or 0); paid_n=int(row[ix["Instalments Paid as at 30-Oct-2026"]] or 0)
+                paid=money(row[ix["Amount Paid as at 30-Oct-2026"]])
+                if principal<=0 or rate<0 or n<1 or n>60 or paid_n<0 or paid_n>n: raise ValueError(f"{no}: invalid loan amount, rate or instalment count.")
+                interest=money(principal*rate/Decimal("100")); total=principal+interest
+                if paid<0 or paid>total: raise ValueError(f"{no}: amount paid must be between zero and total repayable ({fmt(total)}).")
+                if Transaction.query.filter_by(reference=no+"-OUT").first(): raise ValueError(f"Disbursement reference already exists for {no}.")
+                if paid>0 and Transaction.query.filter(Transaction.reference.in_([no+"-OPENPAY-I",no+"-OPENPAY-P"])).first(): raise ValueError(f"Opening repayment reference already exists for {no}.")
+                loan=Loan(loan_no=no,member_id=member.id,principal=principal,rate=rate,interest_total=interest,installments=n,first_due=first,disbursement_date=disb,created_by=actor)
+                db.session.add(loan); db.session.flush(); build_schedule(loan)
+                schedule=list(loan.schedules)
+                full_paid=sum((money(x.principal_due)+money(x.interest_due) for x in schedule[:paid_n]),Decimal("0"))
+                next_boundary=sum((money(x.principal_due)+money(x.interest_due) for x in schedule[:min(paid_n+1,n)]),Decimal("0"))
+                if paid+Decimal("0.01")<full_paid:
+                    raise ValueError(f"{no}: amount paid ({fmt(paid)}) is insufficient for {paid_n} fully paid instalments ({fmt(full_paid)} required).")
+                if paid_n<n and paid>=next_boundary+Decimal("0.01"):
+                    raise ValueError(f"{no}: amount paid is enough for more instalments than the {paid_n} reported as paid. Increase the paid-instalment count.")
+                db.session.add(Transaction(reference=no+"-OUT",member_id=member.id,loan_id=loan.id,txn_type="Disbursement",category="LOAN_DISBURSEMENT",amount=principal,transaction_date=disb,description="Opening loan register: original disbursement",created_by=actor))
+                if paid>0: apply_repayment(loan,paid,LOAN_SNAPSHOT_DATE,no+"-OPENPAY",actor)
+                p_out,i_out=loan_outstanding(loan)
+                loan.status="Closed" if p_out+i_out==0 else "Active"
+                count+=1
+            if count==0: raise ValueError("No loan rows were found in the worksheet.")
+            db.session.commit()
+            flash(f"Outstanding loan register loaded as at 30 October 2026: {count} loans. Instalments, amounts paid and remaining schedules are now tracked individually.","success")
+        except Exception as e:
+            db.session.rollback(); flash(f"Loan opening upload rejected; no loans were posted. {e}","danger")
+        return redirect(url_for("opening"))
+
     @app.route("/historical/template")
     @roles_required("Administrator","Chairman","Accountant")
     def historical_template():
         wb=Workbook(); ws=wb.active; ws.title="Contributions"
         ws.append(["Reference","Transaction Date","Member No","Category","Amount","Description"])
-        ws.append(["HIST-CON-001","2026-10-05","REPLACE-WITH-MEMBER-NO","SHARE",100000,"October contribution"])
+        ws.append(["HIST-CON-001","2026-11-05","REPLACE-WITH-MEMBER-NO","SHARE",100000,"November contribution"])
         loans=wb.create_sheet("Loans")
         loans.append(["Loan No","Member No","Disbursement Date","Principal","Flat Interest Rate %","Installments","First Due Date"])
-        loans.append(["HIST-LN-001","REPLACE-WITH-MEMBER-NO","2026-10-10",500000,10,5,"2026-11-10"])
+        loans.append(["HIST-LN-001","REPLACE-WITH-MEMBER-NO","2026-11-10",500000,10,5,"2026-12-10"])
         reps=wb.create_sheet("Repayments")
         reps.append(["Reference","Loan No","Repayment Date","Amount","Description"])
-        reps.append(["HIST-REP-001","HIST-LN-001","2026-11-10",110000,"First instalment"])
+        reps.append(["HIST-REP-001","HIST-LN-001","2026-12-10",110000,"First instalment"])
         return excel_send(wb,"Visionaries_Historical_Transactions_Template.xlsx")
     @app.route("/historical/upload",methods=["GET","POST"])
     @roles_required("Administrator","Chairman","Accountant")
@@ -513,7 +606,7 @@ def create_app():
             if not all(x in wb.sheetnames for x in ["Contributions","Loans","Repayments"]):
                 raise ValueError("Workbook must contain Contributions, Loans and Repayments sheets. Download the supplied template.")
             opening=OpeningBatch.query.filter_by(status="Approved").order_by(OpeningBatch.opening_date.desc()).first()
-            if not opening: raise ValueError("Approve the September opening balance before uploading historical transactions.")
+            if not opening: raise ValueError("Approve the 31 October 2026 opening balance before uploading historical transactions.")
             lower=opening.opening_date + timedelta(days=1); upper=date.today(); actor=current_user().id
             counts={"contributions":0,"loans":0,"repayments":0}
             seen_refs=set(); seen_loans=set()
@@ -670,6 +763,35 @@ def create_app():
             db.session.add(rev)
             db.session.commit(); flash("Transaction reversed and original transaction retained with reversal status.","success")
         return redirect(request.referrer or url_for("reports"))
+    @app.route("/admin/reset-operational-data",methods=["GET","POST"])
+    @roles_required("Administrator")
+    def reset_operational_data():
+        if request.method=="POST":
+            if request.form.get("confirmation")!="CLEAR ALL GROUP DATA":
+                flash("Reset cancelled. Type the exact confirmation phrase to proceed.","danger")
+                return redirect(url_for("reset_operational_data"))
+            try:
+                # Keep user accounts and group settings to avoid locking the group out.
+                # Clear all member and financial/operational records only.
+                Transaction.query.delete(synchronize_session=False)
+                LoanInstallment.query.delete(synchronize_session=False)
+                Loan.query.delete(synchronize_session=False)
+                OpeningBalance.query.delete(synchronize_session=False)
+                OpeningBatch.query.delete(synchronize_session=False)
+                MpesaReconciliation.query.delete(synchronize_session=False)
+                CashMovement.query.delete(synchronize_session=False)
+                ContributionPeriod.query.delete(synchronize_session=False)
+                User.query.update({User.member_id:None},synchronize_session=False)
+                User.query.filter(User.role!="Administrator").update({User.active:False},synchronize_session=False)
+                Member.query.delete(synchronize_session=False)
+                db.session.commit()
+                session.clear()
+                flash("All member and operational financial data has been cleared. Administrator account(s) and group settings were retained; non-administrator accounts were deactivated.","success")
+                return redirect(url_for("login"))
+            except Exception as e:
+                db.session.rollback(); flash(f"Reset failed; database transaction was rolled back. {e}","danger")
+        return render_template("reset_data.html")
+
     @app.cli.command("init-db")
     def init_db():
         db.create_all()

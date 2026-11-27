@@ -16,3 +16,10 @@ def test_partial_first_instalment():
     assert interest_paid == Decimal("60000.00")
     assert principal_paid == Decimal("20000.00")
     assert money(100000 - principal_paid) == Decimal("80000.00")
+
+
+def test_monthly_due_dates_preserve_calendar_month_end():
+    from datetime import date
+    from app import add_months
+    assert add_months(date(2026, 1, 31), 1) == date(2026, 2, 28)
+    assert add_months(date(2026, 1, 31), 2) == date(2026, 3, 31)

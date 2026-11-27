@@ -1,81 +1,41 @@
-# VISIONARIES SMART KIKOBA V1.2
+# VISIONARIES SMART KIKOBA V1.3
 
-Standalone first release built from scratch. Flask + SQLAlchemy + PostgreSQL, Render deployment, TZS currency.
+Flask-based group savings and loan management portal. Currency: TZS. Production database: PostgreSQL on Render; local development defaults to SQLite.
 
-## Included
-- Role-based access: Administrator, Chairman, Secretary, Treasurer, Accountant, Member.
-- Administrator-only Excel member import using a downloadable template; no automatic placeholder-member creation.
-- Administrator member editing, activation/deactivation and guarded deletion (financial-history members are protected).
-- Downloadable PDF loan receipt with loan amount, interest, total repayable, instalment dates and outstanding balances.
-- Member registry and member-only financial views.
-- SHARE, SOCIAL and separately identified penalty receipts (penalties included in SOCIAL once).
-- Flat-rate loans, automatic schedule, interest-first repayment allocation, partial repayments.
-- September opening balances with selectable opening date, Excel template/upload, draft/Chairman approval lock.
-- Historical backdated transactions from the day after the approved September opening date, with separate transaction and entry timestamps.
-- M-Pesa cash movement reconciliation, variance history, Chairman review without auto-balancing.
-- Cash expenses/withdrawals/other movements.
-- Historical date reporting and Excel export.
-- Transaction reversals with mandatory explanations; original transactions remain marked as reversed.
-- Configurable contribution and penalty settings.
-- Historical Excel upload with Contributions, Loans and Repayments worksheets for dates from 1 October 2026 to the current date. All worksheets validate in one transaction; duplicates or invalid rows reject the whole upload.
-- Audit Trail module, page, route and active logging functionality removed. Existing database tables are left untouched to protect deployed data.
+## V1.3 changes
+- Opening member balances can be uploaded as at **31 October 2026**.
+- Existing outstanding loans can be uploaded separately as at **30 October 2026**, one loan per Excel row.
+- Loan upload captures original loan date, original principal, flat interest rate, total instalments, fully paid instalments, cumulative amount paid to 30 October, and first due date.
+- The application builds the remaining monthly instalment schedule, allocates historic paid amounts to the earliest instalments (interest first), and records the historic loan disbursement and payment movements.
+- Loan pages show remaining instalments, overdue instalments, next due date and paid/overdue/future status for every instalment. Loan receipts continue to show the full schedule and current outstanding balances.
+- New historical contributions, loans and repayments after the 31 October opening date are uploaded through the historical workbook (from 1 November 2026 onward).
+- Added an Administrator-only **Clear group data** screen. It requires typing `CLEAR ALL GROUP DATA` and ticking a confirmation checkbox. It clears members, contributions, loans, loan instalments, opening batches, cash movements, M-Pesa reconciliations and contribution periods. It retains administrator accounts and group settings; non-administrator accounts are deactivated and unlinked. It is not run automatically on deployment.
+- Audit Trail functionality remains removed.
+
+## Important accounting treatment
+1. Upload the member contribution opening position dated **31 October 2026**.
+2. Upload each outstanding loan with the loan register dated **30 October 2026**.
+3. Do **not** enter aggregate loan principal or loan interest in the member opening-balance worksheet. The separate loan register creates each loan and its remaining balance. This prevents double counting. Keep the `Loan Principal` and `Loan Interest` columns at zero in the opening-balance sheet.
+4. Enter the actual cumulative amount received up to 30 October 2026 in the loan register. `Instalments Paid` means the number of completely settled instalments. A partial payment after those complete instalments is included in `Amount Paid`. The amount paid must be consistent with the number of fully paid instalments.
+5. After the opening position is approved, upload contributions, new loans and repayments dated 1 November 2026 onward using the Historical Transactions workbook. Use unique transaction references and the same loan number on loan and repayment rows.
 
 ## Local setup
-1. Python 3.12 recommended.
+1. Python 3.12 or later recommended.
 2. `python -m venv .venv` and activate it.
 3. `pip install -r requirements.txt`
-4. Set `SECRET_KEY`, `DATABASE_URL` (optional; defaults to SQLite locally).
-5. `flask --app wsgi.py init-db`
-6. `flask --app wsgi.py run`
-
-For first-time database setup, set `BOOTSTRAP_ADMIN_USERNAME` and `BOOTSTRAP_ADMIN_PASSWORD` before running `init-db`. Existing administrator accounts are not reset by this command. Do not use a shared/default production password.
+4. Set `SECRET_KEY`, `DATABASE_URL` (optional locally).
+5. Set `BOOTSTRAP_ADMIN_USERNAME` and `BOOTSTRAP_ADMIN_PASSWORD` for first-time database setup.
+6. `flask --app wsgi.py init-db`
+7. `flask --app wsgi.py run`
 
 ## Render deployment
-- Create a PostgreSQL database and web service, or deploy using `render.yaml`.
-- Set `SECRET_KEY` to a long random secret.
-- Set `BOOTSTRAP_ADMIN_PASSWORD` to a unique strong password.
-- Build: `pip install -r requirements.txt`
-- Start: `flask --app wsgi.py init-db && gunicorn wsgi:app`
+- Keep the existing Render service, PostgreSQL database and `DATABASE_URL`. Do not delete or recreate the production database.
+- Build command: `pip install -r requirements.txt`
+- Start command: `flask --app wsgi.py init-db && gunicorn wsgi:app`
+- `init-db` creates missing tables and creates an administrator only if the configured username does not already exist. It does not clear or reset existing records.
 
-### First deployment database initialization
-For first-time deployment, the start command runs the idempotent `init-db` command. It creates missing tables and bootstraps the configured administrator only when that username does not already exist. It does not create placeholder members, drop tables or delete existing records. Keep the existing Render PostgreSQL database and its `DATABASE_URL`; do not create a replacement database for this upgrade.
+## Clearing the old portal data
+The ZIP does not automatically wipe the live database. After deploying and signing in as Administrator, open **Administration → Clear group data**, review the list of records to be deleted, type the exact phrase `CLEAR ALL GROUP DATA`, tick the checkbox and submit. Take a PostgreSQL backup first. The reset is permanent. It retains administrator login(s) and group settings; all non-administrator accounts are deactivated.
 
-## Financial rules
-- Flat interest = principal × flat rate.
-- First installment carries all loan interest; principal is distributed equally across installments.
-- Repayment is applied to earliest outstanding installment, interest first, then principal.
-- Only collected interest is realised profit; principal repayment is not profit.
-- Penalties are a distinct reporting category but counted once within SOCIAL.
-- Expected M-Pesa is movement-based: opening cash + all receipts including principal repayments and interest − disbursements − cash outflows ± other movements.
-- The separate group financial position formula is not a substitute for the movement-based cash reconciliation.
-- Reconciliation variances are displayed and never auto-cleared.
-- Opening balance batches affect official totals only after Chairman approval.
-
-## Important release limitations / hardening before live financial use
-- The supplied requirements did not specify the group's confirmed SHARE/SOCIAL allocation; settings are configurable and seeded with 50/50 as an editable starting value, not an approved policy.
-- Four weekly contribution opportunities and penalty assessment are represented through contribution-period configuration, but scheduled automatic penalty accrual is not yet implemented; penalty receipts can be posted manually.
-- Automated member compliance scoring, M-Pesa statement import/API integration, notification delivery, and detailed adjustment approval workflow are not included in this release.
-- The application provides the core posting and approval workflows; conduct user acceptance testing and an independent financial control review before live deployment.
-- For live use, add CSRF tokens to every form, enforce password policy/rate limiting, configure HTTPS, backup PostgreSQL, and test restore procedures. Flask-WTF is installed but CSRF enforcement is not yet wired into all forms.
-- Do not treat the generated example/test data as actual group balances.
-
-## Database migrations
-Initialize migrations on the development copy with `flask --app wsgi.py db init`, then `flask --app wsgi.py db migrate -m "initial schema"` and `flask --app wsgi.py db upgrade`. Commit the generated `migrations/` directory to source control. On a brand-new database, `flask init-db` is the simplest bootstrap path.
-
-
-## Historical upload sequence
-1. Upload and approve the opening balance workbook with an opening date of 30 September 2026.
-2. Download the Historical Transactions template from the Historical Upload menu.
-3. Populate Contributions, Loans and Repayments. Use the same loan number on the Loans and Repayments sheets.
-4. Upload once. The entire workbook is rejected if any row is invalid or has a duplicate reference. Review reports after upload.
-
-The historical upload is designed for the 2026/27 catch-up period and accepts dates after the approved September opening date through the date of upload. Audit Trail screens and writes are disabled; the legacy database table is not dropped during deployment.
-
-
-## V1.2 historical data setup
-1. Upload members and confirm member numbers.
-2. Download the September opening balance template, enter balances as at 30 September 2026, upload and obtain Chairman approval.
-3. Download the Historical Transactions template and upload contributions, loan disbursements and repayments from 1 October 2026 onward. Keep each loan disbursement row before its repayment rows and use the same Loan Reference.
-4. Historical upload validates all rows and rolls back the complete batch if any row is invalid. Transaction references must be unique.
-
-The separate Audit Trail feature and its application routes/pages have been removed. Existing legacy database audit-log tables, if present from an earlier deployment, are left untouched and are no longer used. No production database or financial records are deleted.
+## Validation status
+Python syntax compilation and ZIP integrity are checked during packaging. A live Flask/PostgreSQL test cannot be claimed unless run against a configured test database. Test this release against a separate test database before clearing or loading live group records.
