@@ -1,4 +1,4 @@
-# VISIONARIES SMART KIKOBA V3.1 deployment checklist
+# VISIONARIES SMART KIKOBA V2.1 deployment checklist
 
 1. Back up the existing PostgreSQL database before deployment.
 2. Replace the application source in the existing GitHub repository with the contents of this folder.
@@ -29,16 +29,3 @@ V2.1 dashboard linkage correction: dashboard SHARE, SOCIAL and loan balances now
 6. Do not use the operational data reset page as part of this upgrade.
 
 V3.0 user deletion preserves financial records and clears only references to the deleted user account.
-
-
-## V3.1 upgrade steps (existing Render service)
-
-1. Take a verified PostgreSQL backup.
-2. Replace the source files in the existing Render service with this V3.1 package. Keep the same Render service, PostgreSQL database and `DATABASE_URL`.
-3. Confirm the Render build command is `pip install -r requirements.txt`; `requirements.txt` contains package requirements only. The `Procfile` contains `web: gunicorn wsgi:app`.
-4. Run `flask --app wsgi:app init-db` once (or allow the configured Render start command to run it). This creates only missing tables for weekly allocations, portal messages and notifications; it does not delete existing records.
-5. In Group Settings, set the monthly SHARE and SOCIAL minimums.
-6. Record a test contribution and select one or more weeks. Open Weekly Obligations to confirm paid weeks and outstanding amounts. Existing unallocated legacy receipts are assigned to the calendar week of their transaction date for reporting.
-7. Test member financial report exports, leader loan application notifications, and leader-to-member messages using test accounts.
-8. Normal members can view their own loans but cannot post, allocate, edit or reverse loan payments. Only authorised leaders can post repayments.
-9. Do not run Clear All Records during an upgrade.
