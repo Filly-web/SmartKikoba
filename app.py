@@ -713,7 +713,8 @@ def create_app():
     @app.route("/contributions",methods=["GET","POST"])
     @login_required
     def contributions():
-        if request.method=="POST" and current_user().role=="Member": abort(403)
+        if request.method=="POST" and current_user().role not in ["Administrator","Chairman","Secretary","Treasurer","Accountant"]:
+            abort(403)
         if request.method=="POST":
             d=date.fromisoformat(request.form["transaction_date"])
             if d<date(2026,10,1): flash("Use the historical Excel upload for dates before October 2026.","danger"); return redirect(url_for("contributions"))
@@ -753,7 +754,8 @@ def create_app():
     @app.route("/loans",methods=["GET","POST"])
     @login_required
     def loans():
-        if request.method=="POST" and current_user().role=="Member": abort(403)
+        if request.method=="POST" and current_user().role not in ["Administrator","Chairman","Secretary","Treasurer","Accountant"]:
+            abort(403)
         if request.method=="POST":
             d=date.fromisoformat(request.form["disbursement_date"]); first=date.fromisoformat(request.form["first_due"])
             if d<date(2026,11,1): flash("For opening loans dated on or before 30 October 2026, use the Outstanding Loans upload. New loans can be posted from 1 November 2026 onward.","danger"); return redirect(url_for("loans"))
@@ -768,7 +770,8 @@ def create_app():
                 category="LOAN_DISBURSEMENT",amount=p,transaction_date=d,description="Loan disbursement",created_by=current_user().id))
             db.session.commit(); flash("Loan and repayment schedule created.","success"); return redirect(url_for("loans"))
         ls=Loan.query.order_by(Loan.disbursement_date.desc()).all()
-        if current_user().role=="Member": ls=[x for x in ls if x.member_id==current_user().member_id]
+        if current_user().role=="Member":
+            ls=[x for x in ls if x.member_id==current_user().member_id and x.status!="Cancelled"]
         return render_template("loans.html",members=Member.query.filter_by(active=True).all(),loans=ls)
     @app.route("/loans/<int:loan_id>/receipt.pdf")
     @login_required
