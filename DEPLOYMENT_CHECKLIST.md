@@ -1,31 +1,36 @@
-# VISIONARIES SMART KIKOBA V2.1 deployment checklist
+# VISIONARIES SMART KIKOBA V3.1.0 deployment checklist
 
-1. Back up the existing PostgreSQL database before deployment.
-2. Replace the application source in the existing GitHub repository with the contents of this folder.
-3. Keep the existing Render service, PostgreSQL database and `DATABASE_URL`. Do not delete or recreate the production database.
-4. Build command: `pip install -r requirements.txt`
-5. Start command: `flask --app wsgi.py init-db && gunicorn wsgi:app`
-6. Deploy and sign in using the existing administrator account.
-7. Ensure the approved 31 October 2026 opening member balance batch contains cumulative SHARE and SOCIAL amounts.
-8. Import all historical loans (active, partly repaid and closed), including original disbursement amounts and cumulative principal/interest repayments or dated Repayment History. These historic loan movements feed the calculated opening M-Koba cash.
-9. The system calculates opening M-Koba cash as opening SHARE + SOCIAL + historic principal repayments + historic interest collected - historic loan disbursements. No manual wallet opening figure is required.
-10. From 1 November 2026 onward, post contributions, new loans and repayments through their respective modules. They automatically update M-Koba. Record only expenses, withdrawals and other cash movements through the M-Koba cash movement screen.
-11. Compare the expected M-Koba balance with the actual wallet statement under M-Koba Reconciliation.
-12. Test the release against a separate test database before relying on it for live financial reporting.
+## Before deployment
+1. Take a full PostgreSQL backup and verify the backup.
+2. Confirm the ZIP is being deployed to the existing Render service.
+3. Confirm the existing `DATABASE_URL` is retained exactly as configured.
+4. Do not create, delete, reset or replace the production database.
+5. Do not change notification-related files, routes, models, templates or tables.
 
-The application does not automatically clear existing data during deployment. The old `mpesa_opening` database field is retained for compatibility but is ignored by the new calculated balance.
+## Deploy
+1. Replace the application source in the existing repository/service with the ZIP contents.
+2. Build command: `pip install -r requirements.txt`
+3. Start command: `flask --app wsgi.py init-db && gunicorn wsgi:app`
+4. `init-db` creates only missing tables. V3.1.0 adds `contribution_obligation` and `contribution_allocation`; it does not alter existing columns or delete records.
+5. Sign in using the existing administrator account.
 
+## Test on a separate database first
+1. Member sign-in and member-only visibility.
+2. Manual member creation and Excel import.
+3. Current-month SHARE/SOCIAL weekly obligation generation.
+4. Independent monthly SHARE and SOCIAL minimum settings.
+5. Automatic allocation to oldest unpaid weeks.
+6. Explicit allocation to selected week(s).
+7. Partial payment and full payment status changes.
+8. Loan disbursement, partial repayment and repayment reversal.
+9. Member My Overdues and leaders' Members with Overdues.
+10. PDF and Excel report exports.
+11. M-Koba ledger, cashflow and reconciliation.
+12. Administrator Clear All Records, using only a disposable test database.
 
-V2.1 dashboard linkage correction: dashboard SHARE, SOCIAL and loan balances now use the latest approved opening batch applicable to the report date and add only transactions posted after that snapshot. This prevents later approved batches from being summed together and prevents pre-opening transactions from being double-counted. November SHARE/SOCIAL receipts and loan principal/interest repayments feed dashboard balances and the M-Koba cashflow automatically.
-
-
-## V3.0 upgrade steps (existing Render service)
-
-1. Take a verified backup of the existing PostgreSQL database.
-2. Replace the deployed source with the V3.0 ZIP contents. Keep the existing Render service and `DATABASE_URL`.
-3. From the Render Shell, run `flask --app wsgi:app init-db` once to create the new loan application table. This calls `create_all()` and does not erase existing records.
-4. Confirm a member login can submit an application using Airtel/Tigo/Halotel; confirm a leader can approve it and see the resulting loan in Loan Tracking.
-5. Test manual loan entry, contribution posting, reversal, monthly contribution export and full-history export.
-6. Do not use the operational data reset page as part of this upgrade.
-
-V3.0 user deletion preserves financial records and clears only references to the deleted user account.
+## Production precautions
+- Do not use Clear All Records as part of deployment.
+- Do not import opening balances a second time.
+- Do not re-enter historical contributions already included in the approved opening position.
+- Historical months with no stored weekly obligation are not assigned new requirements using today's contribution settings.
+- Reconcile the new weekly overdue totals against the group's approved contribution records before treating them as authoritative.

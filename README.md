@@ -145,3 +145,55 @@ Authorised operational entries are posted immediately (status `Posted`) and upda
 ### Verification limitation
 
 Python syntax compilation and template parsing should be completed before release. Full Flask integration tests require installing the packages in `requirements.txt`; this build environment had no network access to install Flask, so it could not run the live Flask application or database integration tests here.
+
+
+## V3.1.0 — contribution allocation, overdues and reporting upgrade
+
+This release is built on the supplied V3.0 source package. It does not claim to be based on V3.1.1 because that source was not included in the supplied files.
+
+### Added
+- Weekly SHARE and SOCIAL obligation records, four per month and category, with saved required amounts and due dates.
+- Administrators can set independent monthly minimum SHARE and SOCIAL amounts.
+- New weekly obligation amounts are frozen when first generated; later settings changes do not rewrite existing obligations.
+- Contribution receipts can be allocated automatically to the oldest outstanding weeks or explicitly to one or more selected weeks.
+- Partial weekly payments reduce only the matching obligation balance. Reversed receipts no longer count as paid allocations.
+- Member **My Overdues** view and leaders' **Members with Overdues** dashboard, covering unpaid loan instalments and weekly SHARE/SOCIAL obligations.
+- Overdue filters by obligation type, member, due month and minimum days overdue.
+- PDF financial report and overdue exports; expanded Excel financial export includes loan register, M-Koba ledger and overdue obligations.
+- Individual member PDF statement, including opening position, closing balances and transaction details.
+- Dashboard summaries for contributions, loans issued, principal repaid, outstanding principal, realised interest, M-Koba cash and overdue obligations.
+- Loan repayment reversals now restore the affected instalment's unpaid amount. Loan disbursement reversal is blocked while posted repayments remain.
+- Clear All Records also clears the newly introduced obligation/allocation records in dependency-safe order.
+
+### Database compatibility
+- Two new tables are introduced: `contribution_obligation` and `contribution_allocation`.
+- Existing tables and columns are not dropped or rewritten.
+- The existing `init-db` command calls SQLAlchemy `create_all()` and creates missing tables only. It does not migrate or alter existing table columns and does not clear operational data.
+- No notification-related code or schema was added or changed.
+- Back up PostgreSQL before deploying. Test on a separate database first.
+
+### Contribution allocation behaviour and limits
+- Four weekly due dates are the 7th, 14th, 21st and last calendar day of the month.
+- Monthly minimum SHARE and SOCIAL amounts are divided across four weeks, with rounding remainder assigned to week 4.
+- The first generation of a month's obligations stores the amount and due date. A later settings change does not recalculate those saved records.
+- To avoid applying a new rate to history, obligations are not auto-generated for past months that have no saved obligation history. Existing historic contributions remain transaction history; this release does not infer historical weekly requirements that were never stored.
+- Receipts not matched to an existing obligation remain recorded as posted cash receipts, but are not represented as a satisfied weekly obligation.
+
+### Deployment notes
+1. Back up the existing PostgreSQL database and verify that the backup can be restored.
+2. Keep the existing Render service and existing `DATABASE_URL`. Do not create or attach a new database.
+3. Deploy the ZIP contents to the existing service.
+4. Run `flask --app wsgi.py init-db` once from the Render Shell, or allow the existing start command to run it. This creates the two new tables without deleting records.
+5. Confirm the existing administrator can sign in. Do not rely on bootstrap credentials to replace an existing administrator.
+6. Test contributions, explicit/automatic week allocations, partial payments, overdue views, reversal behaviour, PDF/Excel exports and the Clear All Records function on a separate test database.
+7. Do not run Clear All Records on production unless the group explicitly intends to permanently erase its operational records.
+
+### Validation performed for this package
+- Python source syntax compilation: passed.
+- ZIP archive integrity: checked during packaging.
+- Existing pytest suite: not executable in the build environment because Flask and other application dependencies are not installed and package installation cannot reach PyPI.
+- Live Flask route/template tests: not run.
+- PostgreSQL migration and Render deployment tests: not run.
+- Financial reconciliation against real group records: not run.
+
+The new obligations feature should be piloted against a test database and sample member data before it is used as the authoritative historical overdue register.

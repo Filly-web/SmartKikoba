@@ -61,6 +61,31 @@ class ContributionPeriod(db.Model):
     minimum_amount = db.Column(db.Numeric(14,2), default=100000)
     share_pct = db.Column(db.Numeric(5,2), default=50)
     social_pct = db.Column(db.Numeric(5,2), default=50)
+class ContributionObligation(db.Model):
+    """Frozen weekly SHARE/SOCIAL requirement; never recalculated from later settings."""
+    id = db.Column(db.Integer, primary_key=True)
+    member_id = db.Column(db.Integer, db.ForeignKey("member.id"), nullable=False)
+    category = db.Column(db.String(10), nullable=False)
+    period = db.Column(db.String(7), nullable=False)
+    week_no = db.Column(db.Integer, nullable=False)
+    required_amount = db.Column(db.Numeric(14,2), nullable=False)
+    due_date = db.Column(db.Date, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    member = db.relationship("Member")
+    __table_args__ = (db.UniqueConstraint("member_id", "category", "period", "week_no",
+                                          name="uq_contribution_obligation_week"),)
+
+class ContributionAllocation(db.Model):
+    """Links a posted receipt to the specific weekly obligation it satisfies."""
+    id = db.Column(db.Integer, primary_key=True)
+    obligation_id = db.Column(db.Integer, db.ForeignKey("contribution_obligation.id"), nullable=False)
+    transaction_id = db.Column(db.Integer, db.ForeignKey("transaction.id"), nullable=False)
+    amount = db.Column(db.Numeric(14,2), nullable=False)
+    obligation = db.relationship("ContributionObligation")
+    transaction = db.relationship("Transaction")
+    __table_args__ = (db.UniqueConstraint("obligation_id", "transaction_id",
+                                          name="uq_obligation_transaction"),)
+
 class Transaction(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     reference = db.Column(db.String(50), unique=True, nullable=False)
@@ -212,6 +237,35 @@ def opening_position(member_id=None, snapshot=None):
     if member_id: q=q.filter(OpeningBalance.member_id==member_id)
     rows=q.all()
     return {k:sum((money(getattr(x,k)) for x in rows), Decimal("0")) for k in ["share","social","penalty","loan_principal","loan_interest","adjustment"]}
+def loan_balances_as_at(as_at=None, member_id=None):
+    """Calculate principal/interest outstanding from dated loan and repayment postings."""
+    as_at = as_at or date.today()
+    loans = Loan.query.filter(Loan.disbursement_date <= as_at)
+    if member_id:
+        loans = loans.filter_by(member_id=member_id)
+    principal_total = Decimal("0")
+    interest_total = Decimal("0")
+    found = False
+    for loan in loans.all():
+        disbursement_reversed = Transaction.query.filter_by(
+            loan_id=loan.id, category="LOAN_DISBURSEMENT", status="Reversal"
+        ).filter(Transaction.transaction_date <= as_at).first()
+        if disbursement_reversed:
+            continue
+        found = True
+        def net_paid(category):
+            posted = db.session.query(func.coalesce(func.sum(Transaction.amount), 0)).filter(
+                Transaction.loan_id == loan.id, Transaction.category == category,
+                Transaction.status.in_(["Posted", "Reversed"])
+            ).filter(Transaction.transaction_date <= as_at).scalar()
+            reversed_amount = db.session.query(func.coalesce(func.sum(Transaction.amount), 0)).filter_by(
+                loan_id=loan.id, category=category, status="Reversal"
+            ).filter(Transaction.transaction_date <= as_at).scalar()
+            return money(posted) - money(reversed_amount)
+        principal_total += max(money(loan.principal) - net_paid("LOAN_PRINCIPAL"), Decimal("0"))
+        interest_total += max(money(loan.interest_total) - net_paid("LOAN_INTEREST"), Decimal("0"))
+    return principal_total, interest_total, found
+
 def totals(as_at=None, member_id=None):
     """Opening position plus transactions posted after that snapshot through as_at."""
     report_date = as_at or date.today()
@@ -234,8 +288,14 @@ def totals(as_at=None, member_id=None):
             if linked_loan: data["loan_interest"] += money(linked_loan.interest_total)
         elif t.category=="LOAN_PRINCIPAL": data["loan_principal"] -= money(t.amount)
         elif t.category=="LOAN_INTEREST": data["loan_interest"] -= money(t.amount)
+    principal_balance, interest_balance, has_loans = loan_balances_as_at(report_date, member_id)
+    if has_loans:
+        data["loan_principal"] = principal_balance
+        data["loan_interest"] = interest_balance
     return data
 def loan_outstanding(loan):
+    if loan.status == "Cancelled":
+        return Decimal("0"), Decimal("0")
     p=money(loan.principal); i=money(loan.interest_total)
     for inst in loan.schedules:
         p -= money(inst.principal_paid); i -= money(inst.interest_paid)
@@ -312,7 +372,7 @@ def mkoba_opening_cash(snapshot):
     contribution_cash = sum((money(item.share) + money(item.social) for item in snapshot.items), Decimal("0"))
     historic_loans = (Transaction.query
         .filter(Transaction.transaction_date <= snapshot.opening_date)
-        .filter(Transaction.status.in_(["Posted", "Reversal"]))
+        .filter(Transaction.status.in_(["Posted", "Reversed", "Reversal"]))
         .filter(Transaction.loan_id.isnot(None))
         .filter(Transaction.category.in_(["LOAN_DISBURSEMENT", "LOAN_PRINCIPAL", "LOAN_INTEREST"]))
         .all())
@@ -343,7 +403,7 @@ def mkoba_cash_ledger(as_at):
         # opening wallet position, and also displayed here for a traceable cash history.
         historical = (Transaction.query
             .filter(Transaction.transaction_date <= snapshot.opening_date)
-            .filter(Transaction.status.in_(["Posted", "Reversal"]))
+            .filter(Transaction.status.in_(["Posted", "Reversed", "Reversal"]))
             .filter(Transaction.loan_id.isnot(None))
             .filter(Transaction.category.in_(["LOAN_DISBURSEMENT", "LOAN_PRINCIPAL", "LOAN_INTEREST"]))
             .all())
@@ -358,7 +418,7 @@ def mkoba_cash_ledger(as_at):
     else:
         movement_start = None
 
-    tq = Transaction.query.filter(Transaction.transaction_date <= as_at).filter(Transaction.status.in_(["Posted", "Reversal"]))
+    tq = Transaction.query.filter(Transaction.transaction_date <= as_at).filter(Transaction.status.in_(["Posted", "Reversed", "Reversal"]))
     mq = CashMovement.query.filter_by(status="Posted").filter(CashMovement.movement_date <= as_at)
     if movement_start:
         tq = tq.filter(Transaction.transaction_date > movement_start)
@@ -401,6 +461,121 @@ def expected_mkoba(as_at):
 def expected_mpesa(as_at):
     return expected_mkoba(as_at)
 
+def contribution_obligation_paid(obligation):
+    """Count only allocations backed by currently posted receipts."""
+    rows = (db.session.query(ContributionAllocation.amount)
+            .join(Transaction, ContributionAllocation.transaction_id == Transaction.id)
+            .filter(ContributionAllocation.obligation_id == obligation.id,
+                    Transaction.status == "Posted").all())
+    return sum((money(row[0]) for row in rows), Decimal("0"))
+
+def ensure_contribution_obligations(period):
+    """Create this month's weekly requirements once, freezing the configured rates."""
+    try:
+        year, month = (int(x) for x in period.split("-"))
+        first = date(year, month, 1)
+    except Exception:
+        raise ValueError("Contribution period must use YYYY-MM.")
+    if first < date(date.today().year, date.today().month, 1):
+        return
+    settings = {x.key: x.value for x in Setting.query.all()}
+    minimum = money(settings.get("minimum_contribution", "100000"))
+    share_pct = money(settings.get("share_pct", "50"))
+    social_pct = money(settings.get("social_pct", "50"))
+    minimum_share = money(settings.get("minimum_share", minimum * share_pct / Decimal("100")))
+    minimum_social = money(settings.get("minimum_social", minimum * social_pct / Decimal("100")))
+    if min(minimum, minimum_share, minimum_social, share_pct, social_pct) < 0:
+        raise ValueError("Minimum contribution amounts and percentages cannot be negative.")
+    if "minimum_share" not in settings and "minimum_social" not in settings and share_pct + social_pct != Decimal("100.00"):
+        raise ValueError("SHARE and SOCIAL percentages must total 100.")
+    last_day = monthrange(year, month)[1]
+    due_days = [min(7,last_day), min(14,last_day), min(21,last_day), last_day]
+    for member in Member.query.filter_by(active=True).all():
+        for category, total in (("SHARE", minimum_share), ("SOCIAL", minimum_social)):
+            total = total.quantize(CENT, rounding=ROUND_HALF_UP)
+            weekly = (total / Decimal("4")).quantize(CENT, rounding=ROUND_HALF_UP)
+            allocated = Decimal("0")
+            for week_no, day in enumerate(due_days, start=1):
+                exists = ContributionObligation.query.filter_by(
+                    member_id=member.id, category=category, period=period, week_no=week_no).first()
+                if exists:
+                    allocated += money(exists.required_amount)
+                    continue
+                amount = weekly if week_no < 4 else total - allocated
+                allocated += amount
+                db.session.add(ContributionObligation(member_id=member.id, category=category,
+                    period=period, week_no=week_no, required_amount=amount,
+                    due_date=date(year, month, day)))
+    db.session.flush()
+
+def allocate_contribution_receipt(txn, period, week_numbers=None):
+    """Allocate cash to selected weeks or oldest matching weekly balances."""
+    if txn.category not in ("SHARE", "SOCIAL"):
+        return
+    remaining = money(txn.amount)
+    query = (ContributionObligation.query
+        .filter_by(member_id=txn.member_id, category=txn.category)
+        .filter(ContributionObligation.period <= period))
+    if week_numbers:
+        query = query.filter(ContributionObligation.period == period,
+                             ContributionObligation.week_no.in_(week_numbers))
+    obligations = query.order_by(ContributionObligation.due_date, ContributionObligation.week_no).all()
+    for obligation in obligations:
+        outstanding = max(money(obligation.required_amount) - contribution_obligation_paid(obligation), Decimal("0"))
+        applied = min(remaining, outstanding)
+        if applied > 0:
+            db.session.add(ContributionAllocation(obligation_id=obligation.id,
+                transaction_id=txn.id, amount=applied))
+            remaining -= applied
+        if remaining <= 0:
+            break
+
+def overdue_summary(member_id=None, as_at=None):
+    as_at = as_at or date.today()
+    ensure_contribution_obligations(as_at.strftime("%Y-%m"))
+    obligations = ContributionObligation.query.filter(ContributionObligation.due_date < as_at)
+    if member_id:
+        obligations = obligations.filter_by(member_id=member_id)
+    share = social = Decimal("0")
+    items = []
+    for item in obligations.order_by(ContributionObligation.due_date).all():
+        paid = contribution_obligation_paid(item)
+        remaining = max(money(item.required_amount) - paid, Decimal("0"))
+        if remaining <= 0:
+            continue
+        if item.category == "SHARE":
+            share += remaining
+        else:
+            social += remaining
+        items.append({"kind": item.category, "member": item.member, "period": item.period,
+            "week": item.week_no, "required": money(item.required_amount), "paid": paid,
+            "remaining": remaining, "due_date": item.due_date,
+            "days": (as_at - item.due_date).days, "obligation": item})
+    loans = Loan.query.all()
+    if member_id:
+        loans = [x for x in loans if x.member_id == member_id]
+    loan_due = Decimal("0")
+    for loan in loans:
+        if loan.status == "Cancelled" or loan.disbursement_date > as_at:
+            continue
+        for inst in loan.schedules:
+            due = money(inst.principal_due) + money(inst.interest_due)
+            paid = money(inst.principal_paid) + money(inst.interest_paid)
+            remaining = max(due - paid, Decimal("0"))
+            if inst.due_date < as_at and remaining > 0:
+                loan_due += remaining
+                items.append({"kind": "LOAN", "member": loan.member, "period": loan.loan_no,
+                    "week": inst.installment_no, "required": due, "paid": paid,
+                    "remaining": remaining, "due_date": inst.due_date,
+                    "days": (as_at - inst.due_date).days, "loan": loan,
+                    "original_loan_amount": money(loan.principal)})
+    items.sort(key=lambda x: x["due_date"])
+    principal_outstanding = sum((loan_outstanding(x)[0] for x in loans), Decimal("0"))
+    return {"share": share, "social": social, "loan": loan_due,
+            "principal_outstanding": principal_outstanding,
+            "total": share + social + loan_due, "count": len(items),
+            "oldest": items[0]["due_date"] if items else None, "items": items}
+
 def create_app():
     app=Flask(__name__)
     app.config["SECRET_KEY"]=os.getenv("SECRET_KEY","dev-only-change-this-secret")
@@ -430,8 +605,18 @@ def create_app():
         cashflow=mkoba_cashflow(d)
         cash=cashflow["closing"]
         members=Member.query.filter_by(active=True).count() if not mid else 1
+        posted = txn_query(d, mid)
+        issued = sum((money(x.amount) for x in posted.filter_by(category="LOAN_DISBURSEMENT").all()), Decimal("0"))
+        principal_repaid = sum((money(x.amount) for x in posted.filter_by(category="LOAN_PRINCIPAL").all()), Decimal("0"))
+        share_total = money(t["share"]); social_total = money(t["social"])
+        contribution_total = share_total + social_total
+        overdue = overdue_summary(mid, d)
+        db.session.commit()
+        tracked_assets = cash + principal
         return render_template("dashboard.html",t=t,loans=loans,principal=principal,interest=interest,
-            interest_realised=interest_realised,cash=cash,cashflow=cashflow,members=members,as_at=d)
+            interest_realised=interest_realised,cash=cash,cashflow=cashflow,members=members,as_at=d,
+            issued=issued,principal_repaid=principal_repaid,contribution_total=contribution_total,
+            overdue=overdue,tracked_assets=tracked_assets)
     @app.route("/login",methods=["GET","POST"])
     def login():
         if request.method=="POST":
@@ -518,8 +703,9 @@ def create_app():
         has_tx=Transaction.query.filter_by(member_id=m.id).first()
         has_loan=Loan.query.filter_by(member_id=m.id).first()
         has_opening=OpeningBalance.query.filter_by(member_id=m.id).first()
+        has_obligation=ContributionObligation.query.filter_by(member_id=m.id).first()
         has_user=User.query.filter_by(member_id=m.id).first()
-        if has_tx or has_loan or has_opening or has_user:
+        if has_tx or has_loan or has_opening or has_obligation or has_user:
             flash("This member has financial records or a linked login. Deactivate the member instead; records are protected.","warning")
         else:
             db.session.delete(m); db.session.commit(); flash("Member deleted.","success")
@@ -546,10 +732,24 @@ def create_app():
             tx=Transaction(reference=ref,member_id=int(request.form["member_id"]),period_id=cp.id,txn_type="Receipt",
                 category=cat,amount=amt,transaction_date=d,description=request.form.get("description"),created_by=current_user().id)
             db.session.add(tx)
-            db.session.commit(); flash("Contribution posted.","success"); return redirect(url_for("contributions"))
+            db.session.flush()
+            # Weekly obligations are created only for the current/future period so a
+            # newly configured rate is never applied retroactively to old months.
+            if period >= date.today().strftime("%Y-%m"):
+                ensure_contribution_obligations(period)
+                selected_weeks = [int(x) for x in request.form.getlist("week_no") if x in ("1","2","3","4")]
+                allocate_contribution_receipt(tx, period, selected_weeks or None)
+            db.session.commit(); flash("Contribution posted. Receipt allocated to the oldest outstanding weekly obligation(s), where available.","success"); return redirect(url_for("contributions"))
+        ensure_contribution_obligations(date.today().strftime("%Y-%m"))
+        db.session.commit()
         q=Transaction.query.filter(Transaction.category.in_(["SHARE","SOCIAL","PENALTY"])).order_by(Transaction.transaction_date.desc())
         if current_user().role=="Member": q=q.filter_by(member_id=current_user().member_id)
-        return render_template("contributions.html",members=Member.query.filter_by(active=True).all(),rows=q.limit(200).all())
+        obligations=ContributionObligation.query.filter_by(period=date.today().strftime("%Y-%m")).order_by(
+            ContributionObligation.member_id, ContributionObligation.category, ContributionObligation.week_no).all()
+        if current_user().role=="Member":
+            obligations=[x for x in obligations if x.member_id==current_user().member_id]
+        return render_template("contributions.html",members=Member.query.filter_by(active=True).all(),
+            rows=q.limit(200).all(), obligations=obligations, paid_fn=contribution_obligation_paid)
     @app.route("/loans",methods=["GET","POST"])
     @login_required
     def loans():
@@ -558,6 +758,7 @@ def create_app():
             d=date.fromisoformat(request.form["disbursement_date"]); first=date.fromisoformat(request.form["first_due"])
             if d<date(2026,11,1): flash("For opening loans dated on or before 30 October 2026, use the Outstanding Loans upload. New loans can be posted from 1 November 2026 onward.","danger"); return redirect(url_for("loans"))
             p=money(request.form["principal"]); rate=money(request.form["rate"]); n=int(request.form["installments"])
+            if first < d: flash("The first instalment date must be on or after the disbursement date.","danger"); return redirect(url_for("loans"))
             if p<=0 or n<1 or n>60 or rate<0: flash("Check principal, rate and installment count.","danger"); return redirect(url_for("loans"))
             interest=money(p*rate/Decimal("100"))
             loan=Loan(loan_no="LN-"+secrets.token_hex(5).upper(),member_id=int(request.form["member_id"]),principal=p,
@@ -1157,6 +1358,53 @@ def create_app():
         as_at=date.today()
         return render_template("cash_movements.html",rows=CashMovement.query.order_by(CashMovement.movement_date.desc()).all(),
             ledger=mkoba_cash_ledger(as_at),cashflow=mkoba_cashflow(as_at))
+    @app.route("/overdues")
+    @login_required
+    def overdues():
+        u = current_user()
+        if u.role == "Member":
+            if not u.member_id: abort(403)
+            summary = overdue_summary(u.member_id)
+            db.session.commit()
+            return render_template("overdues.html", summary=summary, leader_view=False, members=[])
+        if u.role not in ["Administrator", "Chairman", "Secretary", "Treasurer", "Accountant"]:
+            abort(403)
+        summary = overdue_summary()
+        db.session.commit()
+        filters = {"kind":request.args.get("kind",""), "member_id":request.args.get("member_id",""),
+                   "month":request.args.get("month",""), "days":request.args.get("days","")}
+        filtered = list(summary["items"])
+        if filters["kind"] in ("LOAN","SHARE","SOCIAL"):
+            filtered = [x for x in filtered if x["kind"] == filters["kind"]]
+        if filters["member_id"].isdigit():
+            filtered = [x for x in filtered if x["member"].id == int(filters["member_id"])]
+        if filters["month"]:
+            filtered = [x for x in filtered if x["due_date"].strftime("%Y-%m") == filters["month"]]
+        if filters["days"].isdigit():
+            filtered = [x for x in filtered if x["days"] >= int(filters["days"])]
+        filtered_loan_ids = {x["loan"].id for x in filtered if x["kind"]=="LOAN"}
+        filtered_principal = sum((loan_outstanding(db.session.get(Loan,lid))[0] for lid in filtered_loan_ids),Decimal("0"))
+        summary = {"loan":sum((x["remaining"] for x in filtered if x["kind"]=="LOAN"),Decimal("0")),
+                   "principal_outstanding":filtered_principal,
+                   "share":sum((x["remaining"] for x in filtered if x["kind"]=="SHARE"),Decimal("0")),
+                   "social":sum((x["remaining"] for x in filtered if x["kind"]=="SOCIAL"),Decimal("0")),
+                   "items":filtered, "count":len(filtered),
+                   "oldest":min((x["due_date"] for x in filtered),default=None)}
+        summary["total"] = summary["loan"] + summary["share"] + summary["social"]
+        member_rows = []
+        for m in Member.query.filter_by(active=True).order_by(Member.member_no).all():
+            rows = [x for x in filtered if x["member"].id == m.id]
+            if rows:
+                ms = {"items":rows,"loan":sum((x["remaining"] for x in rows if x["kind"]=="LOAN"),Decimal("0")),
+                      "share":sum((x["remaining"] for x in rows if x["kind"]=="SHARE"),Decimal("0")),
+                      "social":sum((x["remaining"] for x in rows if x["kind"]=="SOCIAL"),Decimal("0")),
+                      "total":sum((x["remaining"] for x in rows),Decimal("0")),
+                      "principal_outstanding":sum((loan_outstanding(l)[0] for l in Loan.query.filter_by(member_id=m.id).all()),Decimal("0")),
+                      "count":len(rows),"oldest":min(x["due_date"] for x in rows)}
+                member_rows.append({"member":m,"summary":ms})
+        return render_template("overdues.html", summary=summary, leader_view=True, members=member_rows,
+            filters=filters, all_members=Member.query.filter_by(active=True).order_by(Member.member_no).all())
+
     @app.route("/reports")
     @login_required
     def reports():
@@ -1182,7 +1430,117 @@ def create_app():
         tx=wb.create_sheet("Transactions"); tx.append(["Reference","Transaction Date","Entry Date/Time","Member","Category","Amount","Status","Description"])
         q=txn_query(d,mid).order_by(Transaction.transaction_date)
         for x in q.all(): tx.append([x.reference,x.transaction_date.isoformat(),x.entry_date.isoformat(),x.member.full_name if x.member else "",x.category,float(x.amount),x.status,x.description])
+        loan_ws=wb.create_sheet("Loan Register")
+        loan_ws.append(["Loan No","Member No","Member Name","Disbursed","Principal","Interest Charged","Principal Outstanding","Interest Outstanding","Status"])
+        for loan in loans:
+            p_out,i_out=loan_outstanding(loan)
+            loan_ws.append([loan.loan_no,loan.member.member_no,loan.member.full_name,loan.disbursement_date.isoformat(),
+                float(loan.principal),float(loan.interest_total),float(p_out),float(i_out),loan.status])
+        cashflow_summary=mkoba_cashflow(d)
+        flow_ws=wb.create_sheet("M-Koba Cashflow")
+        flow_ws.append(["Description","Amount (TZS)"])
+        flow_ws.append(["Opening cash",float(cashflow_summary["opening"])])
+        flow_ws.append(["Cash inflows",float(cashflow_summary["inflows"])])
+        flow_ws.append(["Cash outflows",float(cashflow_summary["outflows"])])
+        flow_ws.append(["Closing cash",float(cashflow_summary["closing"])])
+        cash_ws=wb.create_sheet("M-Koba Cash Ledger")
+        cash_ws.append(["Date","Reference","Source","Category","Direction","Amount (TZS)","Status","Description"])
+        for entry in mkoba_cash_ledger(d):
+            cash_ws.append([entry["date"].isoformat(),entry["reference"],entry["source"],entry["category"],
+                entry["direction"],float(entry["amount"]),entry["status"],entry["description"]])
+        od=overdue_summary(mid,d)
+        db.session.commit()
+        od_ws=wb.create_sheet("Overdue Obligations")
+        od_ws.append(["Type","Member","Reference / Period","Week / Instalment","Due Date","Required","Paid","Outstanding","Days Overdue"])
+        for item in od["items"]:
+            od_ws.append([item["kind"],item["member"].full_name,item["period"],item["week"],item["due_date"].isoformat(),
+                float(item["required"]),float(item["paid"]),float(item["remaining"]),item["days"]])
         return excel_send(wb,f"Kikoba_Report_{d.isoformat()}.xlsx")
+    @app.route("/reports/export.pdf")
+    @login_required
+    def export_report_pdf():
+        u=current_user(); mid=u.member_id if u.role=="Member" else request.args.get("member_id",type=int)
+        try: d=date.fromisoformat(request.args.get("as_at","")) if request.args.get("as_at") else date.today()
+        except ValueError: abort(400)
+        t=totals(d,mid); txns=txn_query(d,mid).order_by(Transaction.transaction_date).all()
+        loans=Loan.query.filter_by(member_id=mid).all() if mid else Loan.query.all()
+        buff=io.BytesIO(); pdf=canvas.Canvas(buff,pagesize=A4); width,height=A4; y=height-45
+        pdf.setFont("Helvetica-Bold",15); pdf.drawString(40,y,"VISIONARIES SMART KIKOBA"); y-=22
+        pdf.setFont("Helvetica-Bold",11); pdf.drawString(40,y,"FINANCIAL REPORT"); y-=18
+        pdf.setFont("Helvetica",9); pdf.drawString(40,y,f"As at {d:%d %b %Y}"); y-=24
+        pdf.setFont("Helvetica-Bold",9); pdf.drawString(40,y,"Financial position"); y-=15
+        pdf.setFont("Helvetica",8)
+        for key,value in t.items():
+            pdf.drawString(42,y,key.replace("_"," ").title()); pdf.drawRightString(555,y,fmt(value)); y-=12
+        y-=12; pdf.setFont("Helvetica-Bold",9); pdf.drawString(40,y,"Loan register"); y-=15
+        pdf.setFont("Helvetica",8)
+        for loan in loans:
+            if y<55: pdf.showPage(); y=height-45; pdf.setFont("Helvetica",8)
+            p_out,i_out=loan_outstanding(loan)
+            pdf.drawString(42,y,f"{loan.loan_no} · {loan.member.full_name}")
+            pdf.drawRightString(555,y,f"Principal {fmt(p_out)} | Interest {fmt(i_out)}"); y-=12
+        y-=12; pdf.setFont("Helvetica-Bold",9); pdf.drawString(40,y,"Transactions"); y-=15
+        pdf.setFont("Helvetica",7)
+        for tx in txns:
+            if y<50: pdf.showPage(); y=height-45; pdf.setFont("Helvetica",7)
+            pdf.drawString(42,y,tx.transaction_date.isoformat())
+            pdf.drawString(105,y,tx.category[:18])
+            pdf.drawString(210,y,tx.reference[:32])
+            pdf.drawRightString(555,y,fmt(tx.amount)); y-=11
+        pdf.save(); buff.seek(0)
+        return send_file(buff,mimetype="application/pdf",as_attachment=True,download_name=f"Kikoba_Report_{d.isoformat()}.pdf")
+
+    @app.route("/overdues/export.xlsx")
+    @login_required
+    def export_overdues_xlsx():
+        u=current_user()
+        if u.role=="Member":
+            if not u.member_id: abort(403)
+            mid=u.member_id
+        else:
+            if u.role not in ["Administrator","Chairman","Secretary","Treasurer","Accountant"]: abort(403)
+            mid=request.args.get("member_id",type=int)
+        summary=overdue_summary(mid)
+        db.session.commit()
+        wb=Workbook(); ws=wb.active; ws.title="Overdue Obligations"
+        ws.append(["Type","Member No","Member Name","Reference / Period","Original Loan Amount",
+                   "Week / Instalment","Due Date","Required (TZS)","Paid (TZS)","Outstanding (TZS)","Days Overdue"])
+        for x in summary["items"]:
+            ws.append([x["kind"],x["member"].member_no,x["member"].full_name,x["period"],
+                float(x.get("original_loan_amount",0)),x["week"],x["due_date"].isoformat(),
+                float(x["required"]),float(x["paid"]),float(x["remaining"]),x["days"]])
+        ws.append(["TOTAL","","","","","","","","",float(summary["total"]),""])
+        return excel_send(wb,f"Visionaries_Overdues_{date.today().isoformat()}.xlsx")
+
+    @app.route("/overdues/export.pdf")
+    @login_required
+    def export_overdues_pdf():
+        u=current_user()
+        if u.role=="Member":
+            if not u.member_id: abort(403)
+            mid=u.member_id
+        else:
+            if u.role not in ["Administrator","Chairman","Secretary","Treasurer","Accountant"]: abort(403)
+            mid=request.args.get("member_id",type=int)
+        summary=overdue_summary(mid); db.session.commit()
+        buff=io.BytesIO(); pdf=canvas.Canvas(buff,pagesize=A4); width,height=A4; y=height-45
+        pdf.setFont("Helvetica-Bold",14); pdf.drawString(40,y,"VISIONARIES SMART KIKOBA"); y-=22
+        pdf.setFont("Helvetica-Bold",11); pdf.drawString(40,y,"OVERDUE OBLIGATIONS"); y-=20
+        pdf.setFont("Helvetica",9); pdf.drawString(40,y,f"Generated {date.today():%d %b %Y} · Total overdue TZS {fmt(summary['total'])}"); y-=25
+        pdf.setFont("Helvetica-Bold",7)
+        for x,label in [(40,"Member"),(180,"Type / Ref"),(310,"Due"),(390,"Outstanding"),(500,"Days")]: pdf.drawString(x,y,label)
+        y-=12; pdf.setFont("Helvetica",7)
+        for item in summary["items"]:
+            if y<50: pdf.showPage(); y=height-45; pdf.setFont("Helvetica",7)
+            pdf.drawString(40,y,(item["member"].member_no+" "+item["member"].full_name)[:26])
+            pdf.drawString(180,y,(item["kind"]+" "+str(item["period"]))[:24])
+            pdf.drawString(310,y,item["due_date"].isoformat())
+            pdf.drawRightString(480,y,fmt(item["remaining"]))
+            pdf.drawRightString(550,y,str(item["days"])); y-=12
+        pdf.save(); buff.seek(0)
+        return send_file(buff,mimetype="application/pdf",as_attachment=True,
+            download_name=f"Visionaries_Overdues_{date.today().isoformat()}.pdf")
+
     @app.route("/contributions/reports")
     @login_required
     def contribution_reports():
@@ -1263,6 +1621,55 @@ def create_app():
         label=(start.isoformat() if start else "ALL")+"_to_"+(end.isoformat() if end else "TODAY")
         return send_file(buff,mimetype="application/pdf",as_attachment=True,download_name=f"Visionaries_Contribution_Report_{label}.pdf")
 
+    @app.route("/member-statement.pdf")
+    @login_required
+    def member_statement_pdf():
+        u = current_user()
+        mid = u.member_id if u.role == "Member" else request.args.get("member_id", type=int)
+        if not mid: abort(400, description="Select a member for the statement.")
+        member = db.get_or_404(Member, mid)
+        d = date.fromisoformat(request.args.get("as_at", date.today().isoformat()))
+        if u.role == "Member" and mid != u.member_id: abort(403)
+        snapshot = mkoba_snapshot(d)
+        txq = txn_query(d, mid)
+        if snapshot:
+            txq = txq.filter(Transaction.transaction_date > snapshot.opening_date)
+        txns = txq.order_by(Transaction.transaction_date, Transaction.id).all()
+        balance = totals(d, mid)
+        opening = opening_position(mid, snapshot)
+        buff = io.BytesIO(); pdf = canvas.Canvas(buff, pagesize=A4); width, height = A4
+        y = height - 48
+        pdf.setFont("Helvetica-Bold", 15); pdf.drawString(42, y, "VISIONARIES SMART KIKOBA"); y -= 24
+        pdf.setFont("Helvetica-Bold", 12); pdf.drawString(42, y, "INDIVIDUAL MEMBER STATEMENT"); y -= 22
+        pdf.setFont("Helvetica", 9)
+        pdf.drawString(42, y, f"Member: {member.member_no} - {member.full_name}"); y -= 15
+        pdf.drawString(42, y, f"Statement date: {d:%d %b %Y}"); y -= 22
+        pdf.setFont("Helvetica-Bold", 9); pdf.drawString(42, y, "Financial position"); y -= 15
+        pdf.setFont("Helvetica", 9)
+        if snapshot:
+            pdf.drawString(42, y, f"Opening position as at {snapshot.opening_date:%d %b %Y}"); y -= 14
+            for label, value in [("Opening SHARE", opening["share"]), ("Opening SOCIAL", opening["social"]),
+                                 ("Opening penalty balance", opening["penalty"])]:
+                pdf.drawString(42, y, label); pdf.drawRightString(555, y, f"TZS {fmt(value)}"); y -= 12
+        for label, value in [("Closing SHARE", balance["share"]), ("Closing SOCIAL (including penalties)", balance["social"]),
+                             ("Outstanding loan principal", sum((loan_outstanding(x)[0] for x in Loan.query.filter_by(member_id=mid).all()), Decimal("0"))),
+                             ("Outstanding loan interest", sum((loan_outstanding(x)[1] for x in Loan.query.filter_by(member_id=mid).all()), Decimal("0")))]:
+            pdf.drawString(42, y, label); pdf.drawRightString(555, y, f"TZS {fmt(value)}"); y -= 14
+        y -= 8; pdf.setFont("Helvetica-Bold", 9)
+        for x, label in [(42,"Date"),(115,"Category"),(220,"Reference"),(420,"Amount (TZS)")]:
+            pdf.drawString(x,y,label)
+        y -= 8; pdf.line(42,y,555,y); y -= 14; pdf.setFont("Helvetica", 8)
+        for tx in txns:
+            if y < 55:
+                pdf.showPage(); y = height - 45; pdf.setFont("Helvetica", 8)
+            pdf.drawString(42,y,tx.transaction_date.isoformat())
+            pdf.drawString(115,y,tx.category[:22])
+            pdf.drawString(220,y,tx.reference[:32])
+            pdf.drawRightString(555,y,fmt(tx.amount)); y -= 13
+        pdf.save(); buff.seek(0)
+        return send_file(buff, mimetype="application/pdf", as_attachment=True,
+                         download_name=f"{member.member_no}_Statement_{d.isoformat()}.pdf")
+
     @app.route("/users",methods=["GET","POST"])
     @roles_required("Administrator")
     def users():
@@ -1282,6 +1689,19 @@ def create_app():
                 db.session.commit(); flash("User created.","success")
             return redirect(url_for("users"))
         return render_template("users.html",users=User.query.all(),members=Member.query.all(),roles=ROLES)
+    @app.route("/users/<int:user_id>/password", methods=["POST"])
+    @roles_required("Administrator")
+    def set_user_password(user_id):
+        target=db.get_or_404(User,user_id)
+        password=request.form.get("password","")
+        if not password:
+            flash("Enter a non-empty password or PIN.","danger")
+        else:
+            target.set_password(password)
+            db.session.commit()
+            flash(f"Password/PIN updated for {target.username}. The value remains securely hashed.","success")
+        return redirect(url_for("users"))
+
     @app.route("/users/<int:user_id>/delete", methods=["POST"])
     @roles_required("Administrator")
     def delete_user(user_id):
@@ -1315,13 +1735,30 @@ def create_app():
     @roles_required("Administrator")
     def settings():
         if request.method=="POST":
-            for key in ["minimum_contribution","share_pct","social_pct","penalty_method","penalty_rate","penalty_fixed","grace_days","deadline_day"]:
-                s=db.session.get(Setting,key)
-                if not s: s=Setting(key=key,value=request.form.get(key,"")); db.session.add(s)
-                else: s.value=request.form.get(key,"")
-            db.session.commit(); flash("Configuration saved.","success"); return redirect(url_for("settings"))
+            try:
+                min_share=money(request.form.get("minimum_share", "0"))
+                min_social=money(request.form.get("minimum_social", "0"))
+                share_pct=money(request.form.get("share_pct","50"))
+                social_pct=money(request.form.get("social_pct","50"))
+                if min_share<0 or min_social<0 or share_pct<0 or social_pct<0 or share_pct+social_pct!=Decimal("100.00"):
+                    raise ValueError("Enter non-negative minimum amounts and allocation percentages totalling 100%.")
+                values={key:request.form.get(key,"") for key in
+                    ["penalty_method","penalty_rate","penalty_fixed","grace_days","deadline_day"]}
+                values.update({"minimum_contribution":str(min_share+min_social),
+                    "minimum_share":str(min_share),"minimum_social":str(min_social),
+                    "share_pct":str(share_pct),"social_pct":str(social_pct)})
+                for key,value in values.items():
+                    setting=db.session.get(Setting,key)
+                    if not setting: setting=Setting(key=key,value=value); db.session.add(setting)
+                    else: setting.value=value
+                db.session.commit(); flash("Configuration saved. Existing weekly obligations retain their original required amounts.","success")
+            except Exception as e:
+                db.session.rollback(); flash(str(e),"danger")
+            return redirect(url_for("settings"))
         vals={x.key:x.value for x in Setting.query.all()}
         vals.setdefault("minimum_contribution","100000"); vals.setdefault("share_pct","50"); vals.setdefault("social_pct","50")
+        vals.setdefault("minimum_share",str(money(vals["minimum_contribution"])*money(vals["share_pct"])/Decimal("100")))
+        vals.setdefault("minimum_social",str(money(vals["minimum_contribution"])*money(vals["social_pct"])/Decimal("100")))
         vals.setdefault("penalty_method","percentage"); vals.setdefault("penalty_rate","30"); vals.setdefault("penalty_fixed","0")
         vals.setdefault("grace_days","0"); vals.setdefault("deadline_day","30")
         return render_template("settings.html",vals=vals)
@@ -1333,12 +1770,40 @@ def create_app():
         if not reason: flash("A reversal reason is mandatory.","danger"); return redirect(request.referrer or url_for("reports"))
         if tx.status!="Posted": flash("Only posted transactions can be reversed.","warning")
         else:
+            linked_loan = db.session.get(Loan, tx.loan_id) if tx.loan_id else None
+            if tx.category == "LOAN_DISBURSEMENT" and linked_loan:
+                repayments = Transaction.query.filter_by(loan_id=linked_loan.id, status="Posted").filter(
+                    Transaction.category.in_(["LOAN_PRINCIPAL","LOAN_INTEREST"])).first()
+                if repayments:
+                    flash("This disbursement cannot be reversed while posted repayments exist. Reverse the repayments first.","danger")
+                    return redirect(request.referrer or url_for("reports"))
+                linked_loan.status = "Cancelled"
+            elif tx.category in ("LOAN_PRINCIPAL","LOAN_INTEREST") and linked_loan:
+                marker = "instalment "
+                try:
+                    inst_no = int((tx.description or "").rsplit(marker,1)[1].split()[0])
+                except Exception:
+                    flash("The repayment cannot be reversed because its instalment allocation cannot be identified.","danger")
+                    return redirect(request.referrer or url_for("reports"))
+                inst = LoanInstallment.query.filter_by(loan_id=linked_loan.id, installment_no=inst_no).first()
+                if not inst:
+                    flash("The repayment instalment could not be found; no reversal was posted.","danger")
+                    return redirect(request.referrer or url_for("reports"))
+                field = "principal_paid" if tx.category == "LOAN_PRINCIPAL" else "interest_paid"
+                current_paid = money(getattr(inst, field))
+                if money(tx.amount) > current_paid:
+                    flash("The repayment amount exceeds the recorded instalment allocation; no reversal was posted.","danger")
+                    return redirect(request.referrer or url_for("reports"))
+                setattr(inst, field, current_paid - money(tx.amount))
+                p_out,i_out=loan_outstanding(linked_loan)
+                linked_loan.status="Closed" if p_out+i_out==0 else "Active"
             tx.status="Reversed"
             rev=Transaction(reference="REV-"+secrets.token_hex(6).upper(),member_id=tx.member_id,loan_id=tx.loan_id,
                 period_id=tx.period_id,txn_type="Reversal",category=tx.category,amount=tx.amount,
-                transaction_date=date.today(),description="Reversal of "+tx.reference,created_by=current_user().id,status="Reversal")
+                transaction_date=date.today(),description="Reversal of "+tx.reference+"; reason: "+reason,
+                created_by=current_user().id,status="Reversal")
             db.session.add(rev)
-            db.session.commit(); flash("Transaction reversed and original transaction retained with reversal status.","success")
+            db.session.commit(); flash("Transaction reversed. Loan instalment balances and M-Koba cash were updated; the original record was retained.","success")
         return redirect(request.referrer or url_for("reports"))
     @app.route("/admin/reset-operational-data",methods=["GET","POST"])
     @roles_required("Administrator")
@@ -1353,6 +1818,8 @@ def create_app():
                 # Remove applications first because approved applications may reference loans.
                 LoanApplication.query.delete(synchronize_session=False)
                 LoanImportReview.query.delete(synchronize_session=False)
+                ContributionAllocation.query.delete(synchronize_session=False)
+                ContributionObligation.query.delete(synchronize_session=False)
                 Transaction.query.delete(synchronize_session=False)
                 LoanInstallment.query.delete(synchronize_session=False)
                 Loan.query.delete(synchronize_session=False)

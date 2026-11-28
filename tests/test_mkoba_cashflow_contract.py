@@ -19,8 +19,9 @@ def test_wallet_formula_includes_all_operational_cash_categories():
     assert 'opening + inflows - outflows' in APP
 
 def test_reversals_reverse_cash_direction():
-    assert 'Transaction.status.in_(["Posted", "Reversal"])' in APP
+    assert 'Transaction.status.in_(["Posted", "Reversed", "Reversal"])' in APP
     assert 'if t.status == "Reversal"' in APP
+    assert 'Transaction.status.in_(["Posted", "Reversed", "Reversal"])' in APP
     assert 'direction = "OUT" if direction == "IN" else "IN"' in APP
 
 def test_snapshot_excludes_earlier_contribution_and_loan_history_from_later_cashflows():
